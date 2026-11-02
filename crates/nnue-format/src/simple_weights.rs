@@ -225,7 +225,7 @@ fn arch_identity(id: &SimpleId) -> String {
         SimpleActivation::CReLU | SimpleActivation::SCReLU => format!("[{ft_in}->{ft_out}x2]"),
     };
     format!(
-        "Features={}(Friend){},\
+        "Features={}{}{},\
          Network=AffineTransform[1<-{}](\
          {}[{}](\
          AffineTransform[{}<-{}](\
@@ -233,6 +233,7 @@ fn arch_identity(id: &SimpleId) -> String {
          AffineTransformSparseInput[{}<-{}](\
          InputSlice[{}(0:{})])))))",
         id.feature_set.arch_feature_name(),
+        id.feature_set.arch_friend_marker(),
         ft_block,
         l2_out,   // Output layer input
         act,      // L2 出力の活性化
@@ -782,6 +783,73 @@ mod tests {
             l1_out: 32,
             l2_out: 32,
         }
+    }
+
+    /// 256x2-32-32 / CReLU の Simple ネットで、YaneuraOu が評価関数ファイルの照合に使う
+    /// 3 つの値 (network hash / FT hash / 本体のバイト数) を固定する。
+    ///
+    /// 期待値は YaneuraOu 形式で配布されている K+P と HalfKP の 256x2-32-32 の評価関数
+    /// ファイルのヘッダから読んだ値。YaneuraOu はアーキ文字列を解釈せず `network hash` だけを
+    /// 照合するので、この 3 つが合えば同じ形で読み込まれる。本体は arch 文字列以降
+    /// (`ft_hash` から末尾まで) で、arch 文字列の長さは含まない。
+    fn assert_matches_distributed_net(
+        feature_set: FeatureSet,
+        network_hash_want: u32,
+        ft_hash_want: u32,
+        body_len_want: usize,
+    ) {
+        let id = SimpleId {
+            feature_set: feature_set.spec(),
+            activation: SimpleActivation::CReLU,
+            ft_out: 256,
+            l1_out: 32,
+            l2_out: 32,
+        };
+        assert_eq!(network_hash(&id), network_hash_want, "network hash");
+        assert_eq!(ft_hash(id.feature_set.feature_hash(), 256), ft_hash_want, "ft hash");
+
+        let weights = SimpleWeights::zeroed(id, 28);
+        let mut bytes = Vec::new();
+        weights.save_quantised(&mut bytes).unwrap();
+        let arch_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len() - (12 + arch_len), body_len_want, "body length");
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            network_hash_want
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[12 + arch_len..16 + arch_len].try_into().unwrap()),
+            ft_hash_want
+        );
+    }
+
+    #[test]
+    fn kp_256x2_32_32_header_matches_the_distributed_net() {
+        assert_matches_distributed_net(FeatureSet::Kp, 0x5C64_64A9, 0x3F57_15FF, 893_740);
+    }
+
+    #[test]
+    fn halfkp_256x2_32_32_header_matches_the_distributed_net() {
+        assert_matches_distributed_net(FeatureSet::HalfKp, 0x3E5A_A6EE, 0x5D69_D7B8, 64_216_876);
+    }
+
+    #[test]
+    fn kp_arch_string_has_no_perspective_marker() {
+        let id = SimpleId {
+            feature_set: FeatureSet::Kp.spec(),
+            activation: SimpleActivation::CReLU,
+            ft_out: 256,
+            l1_out: 32,
+            l2_out: 32,
+        };
+        assert!(build_arch_str(&id, 28).starts_with("Features=K+P[1710->256x2],Network="));
+        let halfkp = SimpleId {
+            feature_set: FeatureSet::HalfKp.spec(),
+            ..id
+        };
+        assert!(
+            build_arch_str(&halfkp, 28).starts_with("Features=HalfKP(Friend)[125388->256x2],")
+        );
     }
 
     #[test]

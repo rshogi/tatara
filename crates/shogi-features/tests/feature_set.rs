@@ -1,7 +1,7 @@
 //! `feature_set` の参照照合・第一原理検証・回帰テスト。
 //!
-//! - 参照実装あり 3 cell (`halfkp` / `halfka-split` / `halfka-hm-merged`):
-//!   nnue-pytorch 系の index 式を移植した oracle / `ShogiHalfKA_hm` と照合。
+//! - 参照実装あり 4 cell (`halfkp` / `halfka-split` / `halfka-hm-merged` / `kp`):
+//!   nnue-pytorch 系・YaneuraOu の index 式を移植した oracle / `ShogiHalfKA_hm` と照合。
 //! - 参照実装なし 2 cell (`halfka-merged` / `halfka-hm-split`): index 範囲・
 //!   injective・玉 plane 衝突・退化一致・perspective swap・mirror involution を
 //!   第一原理で検証する。
@@ -221,9 +221,118 @@ fn oracle_halfka_split(board: &ShogiBoard) -> Vec<(usize, usize)> {
     out
 }
 
+/// `kp` (YaneuraOu の特徴量リスト `FeatureSet<K, P>`) index 式の参照 oracle。
+///
+/// 特徴量 `P` が駒 (玉以外) と手駒の BonaPiece をそのまま `[0, 1548)` に、特徴量 `K` が
+/// 両玉の BonaPiece から 1548 を引いた値を返し、リストの合成で `K` の側に `P` の次元数
+/// 1548 が足される。玉の分は引いて足すので、最終的な index は BonaPiece の値そのもの。
+/// 玉位置による bucket は無い。
+fn oracle_kp(board: &ShogiBoard) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let stm = board.side_to_move;
+    let nstm = stm.opponent();
+    let stm_king = board.king_square(stm);
+    let nstm_king = board.king_square(nstm);
+    if !stm_king.is_valid() || !nstm_king.is_valid() {
+        return out;
+    }
+    for &pt in &BOARD_PIECE_TYPES {
+        for color in [Color::Black, Color::White] {
+            for sq in board.pieces(color, pt) {
+                let piece = Piece::new(color, pt);
+                let stm_bp = BonaPiece::from_piece_square(piece, sq, stm);
+                let nstm_bp = BonaPiece::from_piece_square(piece, sq, nstm);
+                out.push((stm_bp.value() as usize, nstm_bp.value() as usize));
+            }
+        }
+    }
+    let king_index = |king: Square, persp: Color, friend: bool| {
+        let base = if friend { F_KING } else { E_KING } as usize;
+        (base - FE_OLD_END) + perspective_index(king, persp) + FE_OLD_END
+    };
+    out.push((
+        king_index(stm_king, stm, true),
+        king_index(nstm_king, nstm, true),
+    ));
+    out.push((
+        king_index(nstm_king, stm, false),
+        king_index(stm_king, nstm, false),
+    ));
+    for owner in [Color::Black, Color::White] {
+        for &pt in &HAND_PIECE_TYPES {
+            for i in 1..=board.hand(owner).count(pt) {
+                let stm_bp = BonaPiece::from_hand_piece(stm, owner, pt, i);
+                if stm_bp != BonaPiece::ZERO {
+                    let nstm_bp = BonaPiece::from_hand_piece(nstm, owner, pt, i);
+                    out.push((stm_bp.value() as usize, nstm_bp.value() as usize));
+                }
+            }
+        }
+    }
+    out
+}
+
 // =============================================================================
-// 参照照合 (参照実装あり 3 cell)
+// 参照照合 (参照実装あり 4 cell)
 // =============================================================================
+
+#[test]
+fn crosscheck_kp_against_oracle() {
+    let spec = FeatureSet::Kp.spec();
+    let mut nonempty = 0;
+    for psv in sample_psv_records() {
+        let board = psv.decode();
+        let got = collect(&spec, &board);
+        let want = oracle_kp(&board);
+        assert_eq!(got, want, "kp が K+P oracle と不一致");
+        nonempty += usize::from(!got.is_empty());
+    }
+    assert!(nonempty > 0, "sample.psv に有効局面が無く照合が空振りしている");
+}
+
+#[test]
+fn kp_dimensions_and_hash_match_the_k_plus_p_feature_list() {
+    let spec = FeatureSet::Kp.spec();
+    assert_eq!(spec.king_buckets(), 1);
+    assert_eq!(spec.piece_inputs(), 1710);
+    assert_eq!(spec.ft_in(), 1710);
+    assert_eq!(spec.max_active(), 40);
+    assert_eq!(spec.arch_feature_name(), "K+P");
+    assert_eq!(spec.arch_friend_marker(), "");
+    // 手元の K+P 評価関数 (256x2-32-32) の FT hash `0x3F5715FF` は
+    // `feature_hash ^ (256 * 2)`。
+    assert_eq!(spec.feature_hash(), 0x3F57_17FF);
+    // 他の feature set は視点 marker を保つ。
+    for fs in FeatureSet::ALL {
+        if fs != FeatureSet::Kp {
+            assert_eq!(fs.spec().arch_friend_marker(), "(Friend)", "{fs:?}");
+        }
+    }
+}
+
+#[test]
+fn kp_extract_matches_map_and_ignores_king_square() {
+    let spec = FeatureSet::Kp.spec();
+    // 玉の位置だけが違う 2 局面: 駒 (玉以外) の特徴は同一で、玉の特徴だけが変わる。
+    let pieces = [(Color::Black, PieceType::Gold, Square::from_index(40))];
+    let a = build_board(Color::Black, Square::from_index(76), Square::from_index(4), &pieces);
+    let b = build_board(Color::Black, Square::from_index(75), Square::from_index(13), &pieces);
+    let fa = collect(&spec, &a);
+    let fb = collect(&spec, &b);
+    assert_eq!(fa.len(), fb.len());
+    assert_eq!(fa[0], fb[0], "玉位置で盤上駒の index が動いてはならない");
+    assert_ne!(fa[1], fb[1]);
+    for (stm, nstm) in fa.iter().chain(fb.iter()) {
+        assert!(*stm < spec.ft_in() && *nstm < spec.ft_in());
+    }
+    let mut stm_out = vec![0i32; spec.max_active()];
+    let mut nstm_out = vec![0i32; spec.max_active()];
+    let n = spec.extract_active_features(&a, &mut stm_out, &mut nstm_out);
+    let got: Vec<(usize, usize)> = (0..n)
+        .map(|i| (stm_out[i] as usize, nstm_out[i] as usize))
+        .collect();
+    assert_eq!(got, fa);
+}
 
 #[test]
 fn crosscheck_halfkp_against_oracle() {

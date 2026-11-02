@@ -120,7 +120,7 @@ fn build_packed_bp_material_table(piece_inputs: usize) -> Vec<f32> {
 /// # Panics
 /// - `out_scaling <= 0.0`
 /// - `num_buckets == 0`
-/// - `spec.piece_inputs() < FE_OLD_END` (公開 5 feature set はいずれも満たす)
+/// - `spec.piece_inputs() < FE_OLD_END` (公開 feature set はいずれも満たす)
 pub fn psqt_material_values(
     spec: &FeatureSetSpec,
     num_buckets: usize,
@@ -252,7 +252,7 @@ mod tests {
             // 依らないため)。spec ごとに ft_in が違うので probe 位置も spec 内に
             // 収まるよう min を取る。
             let probes = [0usize, 100, 1000, 5000, spec.ft_in() - 1];
-            for &feat in &probes {
+            for &feat in probes.iter().filter(|&&feat| feat < spec.ft_in()) {
                 let base = feat * TEST_NUM_BUCKETS;
                 let v0 = vals[base];
                 for b in 1..TEST_NUM_BUCKETS {

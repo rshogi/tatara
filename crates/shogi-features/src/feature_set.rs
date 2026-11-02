@@ -47,13 +47,16 @@ pub(crate) enum KingSquareMode {
     /// 6-9 筋を 1-4 筋へ筋反転して 45 bucket にする。玉が 6-9 筋のときは
     /// 盤駒の筋も反転して左右対称な局面を同一表現に正規化する。
     HorizontalMirror,
+    /// 玉マスを bucket に使わない (bucket は 1 個)。玉の位置は玉自身の特徴
+    /// (軸 1 が玉を特徴化するとき) としてだけ現れる。
+    Shared,
 }
 
 // =============================================================================
 // 公開 feature set
 // =============================================================================
 
-/// 公開 feature set。内部の 2 軸組み合わせのうち正式サポートする 5 cell。
+/// 公開 feature set。内部の 2 軸組み合わせのうち正式サポートする 6 cell。
 #[allow(clippy::enum_variant_names)]
 // 全 variant が HalfKP/HalfKA 系列。`Half` は
 // Stockfish 由来の確立した語で、prefix を削ると feature set 名として不明瞭になる。
@@ -69,16 +72,20 @@ pub enum FeatureSet {
     HalfKaHmSplit,
     /// 両玉を 1 plane へ畳む・半面ミラー。
     HalfKaHmMerged,
+    /// 玉位置で bucket を分けず、駒 (玉以外) と両玉のマスをそれぞれ独立した
+    /// 特徴にする。HalfKA-split の king bucket を 1 個に潰した形。
+    Kp,
 }
 
 impl FeatureSet {
     /// 全公開 feature set。
-    pub const ALL: [FeatureSet; 5] = [
+    pub const ALL: [FeatureSet; 6] = [
         FeatureSet::HalfKp,
         FeatureSet::HalfKaSplit,
         FeatureSet::HalfKaMerged,
         FeatureSet::HalfKaHmSplit,
         FeatureSet::HalfKaHmMerged,
+        FeatureSet::Kp,
     ];
 
     /// CLI / artifact header が扱う flat な canonical 名。
@@ -89,6 +96,7 @@ impl FeatureSet {
             FeatureSet::HalfKaMerged => "halfka-merged",
             FeatureSet::HalfKaHmSplit => "halfka-hm-split",
             FeatureSet::HalfKaHmMerged => "halfka-hm-merged",
+            FeatureSet::Kp => "kp",
         }
     }
 
@@ -175,6 +183,20 @@ impl FeatureSet {
                 threat_profile: None,
                 effect_bucket_config: None,
             },
+            FeatureSet::Kp => FeatureSetSpec {
+                feature_set: self,
+                king_encoding: KingEncoding::SplitPlane,
+                king_square_mode: KingSquareMode::Shared,
+                king_buckets: 1,
+                piece_inputs: PIECE_INPUTS_SPLIT,
+                max_active: MAX_ACTIVE_WITH_KING,
+                feature_hash: FEATURE_HASH_KP,
+                arch_feature_name: "K+P",
+                ft_factorize: false,
+                ft_factorize_mode: FtFactorizeMode::Base,
+                threat_profile: None,
+                effect_bucket_config: None,
+            },
         }
     }
 }
@@ -208,6 +230,14 @@ const FEATURE_HASH_HALFKA_HM_MERGED: u32 = 0x7F13_4CB8;
 const FEATURE_HASH_HALFKA_MERGED: u32 = fnv1a32("halfka-merged");
 /// `halfka-hm-split` の feature 定数。
 const FEATURE_HASH_HALFKA_HM_SPLIT: u32 = fnv1a32("halfka-hm-split");
+
+/// kp の feature hash。YaneuraOu の特徴量 `K` と `P` の hash を、特徴量リスト
+/// `FeatureSet<K, P>` と同じ式 (`head ^ (tail << 1) ^ (tail >> 31)`) で合成した値。
+const FEATURE_HASH_KP: u32 = {
+    const HASH_K: u32 = 0xD3CE_E169;
+    const HASH_P: u32 = 0x764C_FB4B;
+    HASH_K ^ (HASH_P << 1) ^ (HASH_P >> 31)
+};
 
 /// FNV-1a 32bit hash。
 const fn fnv1a32(s: &str) -> u32 {
@@ -520,6 +550,16 @@ impl FeatureSetSpec {
         self.arch_feature_name
     }
 
+    /// arch 文字列で feature 名の直後に付く視点 marker。視点ごとに FT を適用する
+    /// feature set は `(Friend)`、駒と玉を視点に依らない 1 つの特徴リストとして並べる
+    /// `K+P` は marker 無し。
+    pub const fn arch_friend_marker(&self) -> &'static str {
+        match self.feature_set {
+            FeatureSet::Kp => "",
+            _ => "(Friend)",
+        }
+    }
+
     /// canonical 名 ([`FeatureSet::canonical_name`])。
     pub const fn canonical_name(&self) -> &'static str {
         self.feature_set.canonical_name()
@@ -822,6 +862,10 @@ impl FeatureSetSpec {
     fn perspective_ctx(&self, king_sq: Square, perspective: Color) -> PerspectiveCtx {
         let king_idx = perspective_index(king_sq, perspective);
         match self.king_square_mode {
+            KingSquareMode::Shared => PerspectiveCtx {
+                king_bucket: 0,
+                mirror_files: false,
+            },
             KingSquareMode::Direct => PerspectiveCtx {
                 king_bucket: king_idx,
                 mirror_files: false,
