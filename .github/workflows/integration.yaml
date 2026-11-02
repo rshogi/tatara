@@ -3,7 +3,7 @@ name: Integration
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 # 同一 ref の続けざまの push は前の run をキャンセルする
@@ -44,10 +44,10 @@ jobs:
           # 同梱の stable は image の版ごとに異なり key が揺れて cache miss になるため外す。
           rustup toolchain uninstall stable
 
-      # PR ごとに ~150MB 保存すると main の cache を押し出すため、保存は main だけにする。
+      # PR ごとに ~150MB 保存すると master の cache を押し出すため、保存は master だけにする。
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/master' }}
 
       # workspace.members が空 (`[]`) のときは `cargo --workspace` が
       #   "manifest is virtual, and the workspace has no members"
@@ -114,7 +114,7 @@ jobs:
 
       # REQUIRE_CLEAN_TREE=true は、checkout した tree に余計な file が混ざると build を
       # 失敗させる (binary の commit stamp が `-dirty` になるため)。cache は deployment.yaml
-      # が main で保存したものを読むだけにする。PR ごとに保存すると main の分を押し出す。
+      # が master で保存したものを読むだけにする。PR ごとに保存すると master の分を押し出す。
       - name: Build
         uses: docker/build-push-action@v6
         with:

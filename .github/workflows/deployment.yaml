@@ -1,14 +1,14 @@
 name: Deployment
 
-# main への push (PR の merge) と手動実行で image を GitHub Container Registry (ghcr.io) に公開する。
+# master への push (PR の merge) と手動実行で image を GitHub Container Registry (ghcr.io) に公開する。
 # `pull_request: closed` ではなく push を使う理由:
-# - checkout が main 上の merge 後の commit になり、binary に埋め込まれる commit
-#   (`nnue-train build-info`) と image tag の sha が main の履歴に実在する commit になる
+# - checkout が master 上の merge 後の commit になり、binary に埋め込まれる commit
+#   (`nnue-train build-info`) と image tag の sha が master の履歴に実在する commit になる
 # - GitHub Actions の cache は ref 単位で、PR の ref で保存した cache は他の PR から
-#   読めない。main の ref で保存すれば全 PR の Docker build から読める
+#   読めない。master の ref で保存すれば全 PR の Docker build から読める
 on:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 concurrency:
@@ -59,8 +59,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # version と latest は main の build だけに付ける。別 branch からの手動実行は
-      # sha tag だけを作り、main の image を上書きしない。
+      # version と latest は master の build だけに付ける。別 branch からの手動実行は
+      # sha tag だけを作り、master の image を上書きしない。
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5

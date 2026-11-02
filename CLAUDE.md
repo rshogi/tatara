@@ -42,9 +42,9 @@ method 利用を誤ってエラー扱いさせる害がある。toolchain を上
   併記する。再現コマンドの data / progress path は local 依存なので placeholder
   (`/path/to/PSV` 等) にし、実 path は書かない
 - negative result も commit を残す (revert commit + Issue 追記の 2 操作)
-- main への直接 push 禁止、必ず PR 経由
-- PR merge は CI green 必須、`--squash --delete-branch` で main に merge
-- `git push --force` は main / merge 済 branch に絶対しない、`--no-verify`
+- master への直接 push 禁止、必ず PR 経由
+- PR merge は CI green 必須、`--squash --delete-branch` で master に merge
+- `git push --force` は master / merge 済 branch に絶対しない、`--no-verify`
   禁止 (CI を skip して push しない)
 
 ## コードコメント規約
