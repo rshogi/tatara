@@ -144,7 +144,9 @@ instructions, and the supported-GPU matrix, see [docs/setup.md](docs/setup.md).
 
 For building the kernels and running the smoke test, see
 [docs/setup.md](docs/setup.md); for how to run training, see
-[docs/training-quickstart.md](docs/training-quickstart.md).
+[docs/training-quickstart.md](docs/training-quickstart.md). To run the trainer in a
+container instead of building it, see "Docker image" in
+[docs/setup.md](docs/setup.md#docker-image).
 
 ## Documentation
 

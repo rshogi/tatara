@@ -24,6 +24,63 @@ instance) and use your local macOS for SSH / editing. Editing a CPU-only crate
 `cargo test -p <crate>` works on macOS, but running `cargo build` across the
 whole workspace fails on the CUDA-dependent builds.
 
+## Docker image
+
+The `Dockerfile` at the repository root builds `nnue-train` and the other
+binaries of the workspace (`net_to_yo`, `net_from_yo`, `net_fv_scale`,
+`ckpt_average`, `eval_sfen`, `progress-kpabs-train`, ...) into one image. The image
+carries the CUDA 12.9 runtime libraries (cuBLAS) and no toolchain, so the host
+needs only an NVIDIA driver that supports CUDA 12.9 and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+
+```bash
+docker pull ghcr.io/rshogi/tatara:latest
+# or build it yourself; the build needs no GPU
+docker build -t tatara .
+```
+
+Everything after the image name is passed to `nnue-train`. Without `--data` the
+`simple` subcommand runs the GPU smoke test and ends with `[smoke/simple] PASSED`:
+
+```bash
+docker run --rm --gpus all ghcr.io/rshogi/tatara simple
+```
+
+To train, mount the teacher data read-only and an output directory that
+survives the container, and refer to both by their paths inside the container
+(options as in the [training quickstart](training-quickstart.md)):
+
+```bash
+docker run --rm --gpus all --user "$(id -u):$(id -g)" \
+  -v /path/to/data:/data:ro -v /path/to/out:/out \
+  ghcr.io/rshogi/tatara \
+  --data /data/shuffled-psv.bin --output /out --net-id <run-name> \
+  --threads <N> \
+  ... simple
+```
+
+| Flag | Why |
+|---|---|
+| `--gpus all` (or `--gpus device=<N>`) | Required. The NVIDIA container runtime injects the driver library; without it the binary exits at startup with `libcuda.so.1: cannot open shared object file`, which also happens for `build-info` |
+| `--threads <N>` | Set it, as outside a container; see "Key options" in the training quickstart |
+| `--user "$(id -u):$(id -g)"` | The container runs as root by default, so checkpoints written to the mounted output directory would otherwise be owned by root |
+| `-v <host>:<container>` for `--output` | Checkpoints and resume state must outlive `--rm` |
+| `--shm-size` | Not needed. The data loader decodes on threads of one process and uses no shared memory, so Docker's default 64 MB is enough |
+
+The other tools are in the same image; select one with `--entrypoint`, e.g.
+`docker run --rm --entrypoint net_to_yo ghcr.io/rshogi/tatara --help`.
+
+The kernels are embedded as PTX for compute capability 8.0 (the Dockerfile's
+`TATARA_CUDA_COMPUTE`), and the driver compiles them for the installed GPU on
+the first launch, so any Ampere or newer GPU runs the image. For a Turing GPU
+build with `docker build --build-arg TATARA_CUDA_COMPUTE=75 -t tatara .`.
+
+The build embeds the git commit and a dirty flag in the binary (see
+[Trainer build provenance](trainer-build-provenance.md)), so run it from a
+checkout that has its own `.git` directory. A source archive or a linked
+worktree makes the build stop with a message saying so;
+`docker run --rm --gpus all <image> build-info` prints the commit that went in.
+
 ## Native Windows (experimental)
 
 The `native` feature does not use cuda-oxide. It launches NVCC-built
