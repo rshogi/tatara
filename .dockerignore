@@ -1,0 +1,45 @@
+# Keep this list to paths that git ignores (see .gitignore). bins/nnue_train/build.rs
+# stamps `-dirty` into the binary when `git status` inside the build context
+# differs from the checkout, and a tracked file left out here counts as deleted.
+# `.git` itself must stay: the commit stamp is read from it. The last rule says so
+# explicitly, because patterns such as **/*.pack also match git's own pack files
+# under .git/objects/pack, and a repository without them cannot resolve HEAD.
+
+# Build artifacts and generated kernels
+target
+**/target
+**/*.rs.bk
+**/*.ll
+**/*.ptx
+**/*.cubin
+**/*.bc
+rustc-ice-*.txt
+
+# Training data and run outputs
+/data
+**/*.bin
+**/*.psv
+**/*.pack
+**/*.nnue
+!crates/shogi-format/tests/data/sample.psv
+/output
+**/output
+/logs
+**/logs
+/checkpoints
+**/checkpoints
+
+# Local notes and machine-specific settings
+/docs/experiments
+/docs/issue
+/bench-pos.local.toml
+/scripts/bench-pos.env
+/.claude
+.idea
+.vscode
+.DS_Store
+*.swp
+
+# Repository metadata is never ignored, whatever the patterns above match inside it.
+!.git
+!.git/**
