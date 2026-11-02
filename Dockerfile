@@ -59,8 +59,9 @@ WORKDIR /src
 ARG REQUIRE_CLEAN_TREE=false
 RUN if ! git rev-parse --verify HEAD >/dev/null 2>&1; then \
       echo "git cannot read a commit from the build context." >&2; \
-      echo ".git must be a full directory here: a linked worktree's .git is a" >&2; \
-      echo "pointer file to a path outside the context and does not work." >&2; \
+      echo "Build from a checkout whose .git is a full directory: a source archive" >&2; \
+      echo "has no .git, and a linked worktree's .git is a pointer file to a path" >&2; \
+      echo "outside the context." >&2; \
       exit 1; \
     fi \
  && changes="$(git status --porcelain --untracked-files=normal)" \
