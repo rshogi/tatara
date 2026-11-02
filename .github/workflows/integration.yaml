@@ -1,4 +1,4 @@
-name: checks
+name: Integration
 
 on:
   pull_request:
@@ -6,26 +6,30 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# 同一 PR の続けざまの push は前の run をキャンセルする
+# 同一 ref の続けざまの push は前の run をキャンセルする
 concurrency:
-  group: checks-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_INCREMENTAL: 0
-  CARGO_PROFILE_DEV_DEBUG: 0
-  # nnue-format 等の数値テストは opt-level 0 だと 1 binary で ~50s 掛かる。
-  # debug-assertions / overflow-checks は opt-level と独立なので検査内容は変わらない。
-  CARGO_PROFILE_DEV_OPT_LEVEL: 1
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+permissions:
+  contents: read
 
+# 公開リポジトリのため GitHub-hosted runner で動かす。self-hosted runner で
+# fork からの PR を実行させない。
 jobs:
   checks:
     name: fmt / clippy / test
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      # nnue-format 等の数値テストは opt-level 0 だと 1 binary で ~50s 掛かる。
+      # debug-assertions / overflow-checks は opt-level と独立なので検査内容は変わらない。
+      CARGO_PROFILE_DEV_OPT_LEVEL: 1
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # rust-toolchain.toml の components (rustc-dev / rust-analyzer / llvm-tools 等) は
       # GPU 開発用で CI では使わず、自動インストールさせると毎回 ~20s 掛かる。
@@ -82,3 +86,59 @@ jobs:
         run: |
           cargo test --workspace --exclude gpu-runtime --exclude progress-kpabs-train --exclude nnue-trainer
           cargo test -p nnue-trainer --no-default-features
+
+  # image が build できることの確認。push はしない (公開は deployment.yaml)。
+  # GPU は build に要らない: kernel は Dockerfile の TATARA_CUDA_COMPUTE で指定した
+  # 仮想 architecture の PTX として埋め込まれ、初回起動時に driver が JIT する。
+  image:
+    name: Docker image
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: tatara:ci
+    steps:
+      # persist-credentials: false にしないと GITHUB_TOKEN が .git/config に残り、
+      # Dockerfile の `COPY . /src` で build stage の layer に入る。
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # CUDA の devel / runtime 両 base image の展開だけで 15 GB 近くになり、
+      # runner 既定の空き容量では足りない。使わない大物を先に消す。
+      - name: Free disk space
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+
+      # REQUIRE_CLEAN_TREE=true は、checkout した tree に余計な file が混ざると build を
+      # 失敗させる (binary の commit stamp が `-dirty` になるため)。cache は deployment.yaml
+      # が main で保存したものを読むだけにする。PR ごとに保存すると main の分を押し出す。
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}
+          build-args: |
+            REQUIRE_CLEAN_TREE=true
+          cache-from: type=gha
+
+      # runtime image に必要な shared library が揃っていることを確認する。libcuda は
+      # GPU 付きの host で NVIDIA container runtime が注入するので、ここでは無くてよい。
+      - name: Check shared libraries
+        run: |
+          missing=$(docker run --rm --entrypoint ldd "$IMAGE" /usr/local/bin/nnue-train | grep 'not found' | grep -v 'libcuda\.so\.1' || true)
+          if [ -n "$missing" ]; then
+            echo "$missing" >&2
+            exit 1
+          fi
+
+      # binary に埋め込まれた commit が checkout の HEAD と一致することを確認する。
+      # GPU が無いので `nnue-train build-info` は動かせず、binary の文字列を直接探す。
+      - name: Check embedded commit
+        run: |
+          expected=$(git rev-parse HEAD)
+          docker run --rm --entrypoint grep "$IMAGE" -aqF "$expected" /usr/local/bin/nnue-train

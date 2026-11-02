@@ -10,7 +10,7 @@ crate (GPU 依存含む) で pass** しない限り push 禁止。
 bash scripts/local-ci.sh
 ```
 
-`.github/workflows/checks.yaml` は GitHub-hosted runner に CUDA / LLVM が無いため
+`.github/workflows/integration.yaml` は GitHub-hosted runner に CUDA / LLVM が無いため
 GPU 依存 crate (`gpu-runtime` / `progress-kpabs-train` / `nnue-trainer`) を
 clippy / test の workspace から exclude しているが、**本機 (CUDA + LLVM 22
 install 済) では exclude なし全 crate check を必須**とする。CI が green でも
