@@ -806,7 +806,11 @@ mod tests {
             l2_out: 32,
         };
         assert_eq!(network_hash(&id), network_hash_want, "network hash");
-        assert_eq!(ft_hash(id.feature_set.feature_hash(), 256), ft_hash_want, "ft hash");
+        assert_eq!(
+            ft_hash(id.feature_set.feature_hash(), 256),
+            ft_hash_want,
+            "ft hash"
+        );
 
         let weights = SimpleWeights::zeroed(id, 28);
         let mut bytes = Vec::new();
@@ -847,9 +851,7 @@ mod tests {
             feature_set: FeatureSet::HalfKp.spec(),
             ..id
         };
-        assert!(
-            build_arch_str(&halfkp, 28).starts_with("Features=HalfKP(Friend)[125388->256x2],")
-        );
+        assert!(build_arch_str(&halfkp, 28).starts_with("Features=HalfKP(Friend)[125388->256x2],"));
     }
 
     #[test]

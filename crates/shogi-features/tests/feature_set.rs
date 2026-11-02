@@ -287,7 +287,10 @@ fn crosscheck_kp_against_oracle() {
         assert_eq!(got, want, "kp が K+P oracle と不一致");
         nonempty += usize::from(!got.is_empty());
     }
-    assert!(nonempty > 0, "sample.psv に有効局面が無く照合が空振りしている");
+    assert!(
+        nonempty > 0,
+        "sample.psv に有効局面が無く照合が空振りしている"
+    );
 }
 
 #[test]
@@ -315,8 +318,18 @@ fn kp_extract_matches_map_and_ignores_king_square() {
     let spec = FeatureSet::Kp.spec();
     // 玉の位置だけが違う 2 局面: 駒 (玉以外) の特徴は同一で、玉の特徴だけが変わる。
     let pieces = [(Color::Black, PieceType::Gold, Square::from_index(40))];
-    let a = build_board(Color::Black, Square::from_index(76), Square::from_index(4), &pieces);
-    let b = build_board(Color::Black, Square::from_index(75), Square::from_index(13), &pieces);
+    let a = build_board(
+        Color::Black,
+        Square::from_index(76),
+        Square::from_index(4),
+        &pieces,
+    );
+    let b = build_board(
+        Color::Black,
+        Square::from_index(75),
+        Square::from_index(13),
+        &pieces,
+    );
     let fa = collect(&spec, &a);
     let fb = collect(&spec, &b);
     assert_eq!(fa.len(), fb.len());
