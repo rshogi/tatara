@@ -36,11 +36,23 @@ default and around **+55%** with `--all-optim` (FP16/TF32).
 **Throughput** (`--batch-size 65536`, pos/s; fp32 → `--all-optim` (fp16/tf32)). The
 `--all-optim` gain is larger on older, more bandwidth-bound GPUs and on bigger nets:
 
-| arch / config (feature) | RTX 5090 | RTX 3080 Ti |
-|---|---|---|
-| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 2.45M → 3.13M (+28%) | 0.99M → 1.59M (+61%) |
-| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 4.24M → 5.10M (+20%) | 2.05M → 2.97M (+45%) |
-| Simple `256x2-32-32` (`halfkp`) | 11.29M → 13.37M (+18%) | 7.30M → 10.10M (+38%) |
+| arch / config (feature) | RTX 5090 | RTX 3080 Ti | RTX 4070 Ti |
+|---|---|---|---|
+| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 2.45M → 3.13M (+28%) | 0.99M → 1.59M (+61%) | 1.26M → 2.14M (+70%) |
+| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 4.24M → 5.10M (+20%) | 2.05M → 2.97M (+45%) | 2.69M → 4.14M (+54%) |
+| Simple `256x2-32-32` (`halfkp`) | 11.29M → 13.37M (+18%) | 7.30M → 10.10M (+38%) | 5.79M → 7.85M (+35%) |
+| Simple `256x2-32-32` (`kp`) | – | – | 6.69M → 6.15M (−8%) |
+
+The RTX 4070 Ti (12 GB) column is the mean of two runs of the command below with the
+teacher file in the page cache and `--superbatches 3` (`--batches-per-superbatch 60` for
+LayerStack, 150 for Simple); the two runs differ by at most 0.2%. For `kp`, whose
+feature transformer has only 1,710 rows, `--all-optim` was slower than fp32. `–` means not
+measured.
+
+Each position is 40 bytes in the teacher file, so training at 6M positions/s reads about
+240 MB/s, and storage that reads more slowly sets a lower limit: 100 MB/s allows about
+2.5M positions/s. A hard disk may not keep up; an SSD, fast network storage, or a teacher
+file that fits in the page cache does.
 
 Measurement command (teacher-data / progress paths are environment-specific;
 compare pos/s with and without `--all-optim`):
@@ -48,9 +60,9 @@ compare pos/s with and without `--all-optim`):
 ```sh
 # LayerStack (halfka-hm-merged, needs progress)
 cargo run --release --bin nnue-train -- \
-  --data /path/to/teacher.psv --progress-coeff /path/to/progress.bin \
+  --data /path/to/teacher.psv \
   --feature-set halfka-hm-merged --batch-size 65536 --superbatches 8 [--all-optim] \
-  layerstack --ft-out {1536|768} --l1 {16|8} --l2 32
+  layerstack --progress-coeff /path/to/progress.bin --ft-out {1536|768} --l1 {16|8} --l2 32
 
 # HalfKP (simple, no progress needed; the simple trainer requires --win-rate-model)
 cargo run --release --bin nnue-train -- \
