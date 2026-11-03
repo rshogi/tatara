@@ -186,9 +186,9 @@ pub(crate) fn simple_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     // Factorized training exports folded base-shape weights, so preserve the exported ID when
     // loading them instead of reattaching the trainer's virtual-row factorizer modifier.
     let reloaded = SimpleWeights::load(&mut std::io::Cursor::new(&quantised_bytes), weights.id)?;
-    if reloaded.fv_scale != smoke_fv_scale {
+    if reloaded.fv_scale != Some(smoke_fv_scale) {
         return Err(format!(
-            "SimpleWeights round-trip: fv_scale mismatch (got {}, want {smoke_fv_scale})",
+            "SimpleWeights round-trip: fv_scale mismatch (got {:?}, want {smoke_fv_scale})",
             reloaded.fv_scale
         )
         .into());

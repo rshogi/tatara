@@ -81,7 +81,7 @@ sigmoid, so this configuration uses the same value for `--scale`, every
 `--wrm-*-scaling`, and `--wrm-nnue2score`. When `simple --fv-scale` is omitted,
 `--scale` must equal `--wrm-nnue2score` whether or not weights are loaded. The
 exported `fv_scale` comes from a v9+ `--resume` checkpoint when available, then
-from the `--init-from` input net, and otherwise from
+from the `--init-from` input net if it carries one, and otherwise from
 `round(127 × QB / --scale)`. Set `simple --fv-scale <N>` to always write `N` and
 waive that equality requirement. A v9+ checkpoint preserves the value without
 respecifying it; when resuming a v8 or earlier checkpoint, repeat an override or
@@ -159,10 +159,30 @@ The names follow the network naming of the
 architecture header from the edition name. An engine built for one network
 refuses a `.bin` of another with `NNUE hash mismatch` and `failed to read nn.bin`.
 
-`.bin` files written by other trainers may be rejected by `--init-from`: the
-architecture string in their header can differ from the one tatara writes (the
-layer names, a `ModelType=` prefix, a missing `fv_scale`), even where the network
-is the same.
+`--init-from` also reads `.bin` files that other trainers wrote for one of
+these networks. A file is accepted when all of these hold:
+
+- its version word, network hash, FT hash and FC hash equal the ones computed
+  for the `--feature-set`, `simple --arch` and `--activation` you pass;
+- the data after the architecture string is exactly the length that network
+  needs, with nothing missing and nothing left over;
+- the architecture string does not name a different activation. The hashes do
+  not encode it, so a string with `SqrClippedReLU` is refused unless
+  `--activation screlu`, and one with a `/2x2]-Pairwise` feature block unless
+  `--activation pairwise`.
+
+The architecture string is otherwise not what identifies the network. It may
+differ from tatara's in a `ModelType=` prefix, in `AffineTransform` where tatara
+writes `AffineTransformSparseInput`, and in lacking `,fv_scale=`; these are
+accepted silently. Any other difference, such as a string that gives the wrong
+layer widths, is accepted with a warning on stderr that shows the two texts.
+A file with a different feature set or layer widths has different hashes and is
+refused.
+
+A file without `,fv_scale=` does not supply an `fv_scale`: the export then uses
+the same value as a run without `--init-from`, `round(127 × QB / --scale)`
+unless `simple --fv-scale` is given, and the startup log line `fv_scale:` says
+so.
 
 ## Setup
 
@@ -304,7 +324,7 @@ own net, see the [setup guide](docs/setup.md).
 | **CReLU / SCReLU / Pairwise** | NNUE activation functions. CReLU = Clipped ReLU, SCReLU = Squared Clipped ReLU, Pairwise = elementwise product of the first and second halves, halving the input dimension. Selected by `--activation` on the `simple` architecture |
 | **RAdam / Ranger** | Rectified Adam / Ranger optimizer (Ranger = RAdam + lookahead) |
 | **WRM** | Win-rate model loss (from bullet `--win-rate-model`) |
-| **QA / QB / FV_SCALE** | Quantisation scale constants. QA = the FT weight / bias quantisation multiplier (on the `simple` architecture it is set by the activation: 127 for CReLU / Pairwise, 255 for SCReLU); QB = dense-weight scale (64). FV_SCALE converts the net output back to a centipawn evaluation. On `simple`, activation outputs are always on a 127 scale, so the default is `round(127 × QB / training scale)`; `--fv-scale` overrides it, while omission retains the value from a v9+ resume checkpoint, then from an `--init-from` input net |
+| **QA / QB / FV_SCALE** | Quantisation scale constants. QA = the FT weight / bias quantisation multiplier (on the `simple` architecture it is set by the activation: 127 for CReLU / Pairwise, 255 for SCReLU); QB = dense-weight scale (64). FV_SCALE converts the net output back to a centipawn evaluation. On `simple`, activation outputs are always on a 127 scale, so the default is `round(127 × QB / training scale)`; `--fv-scale` overrides it, while omission retains the value from a v9+ resume checkpoint, then from an `--init-from` input net that carries one |
 | **WDL** | Win/Draw/Loss — the game-result target (1.0 / 0.5 / 0.0) blended against the teacher score by the WDL lambda; see [docs/training-schedule.md](docs/training-schedule.md) |
 | **FNV-1a** | Fowler–Noll–Vo hash, variant 1a — a simple non-cryptographic hash. The trainer uses its 64-bit form for the recipe fingerprint stored in resume checkpoints |
 | **CV** | Coefficient of variation — sample standard deviation divided by the mean, reported as a percentage for benchmark run-to-run variability |
