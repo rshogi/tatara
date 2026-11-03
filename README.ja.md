@@ -139,6 +139,21 @@ file 構造で書き出すので、表の edition でビルドしたエンジン
 | `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
 | `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
 
+`layerstack` のネットワークも 2 つ、NAGISA の評価関数ファイルと同じ file 構造で書き出せる。
+局面を 9 個の stack に振り分け、両玉が盤の中央まで入った局面は bucket 8、それ以外は
+進行度で bucket 0〜7 になる。進行度には、学習に使った `progress.bin` が要る。
+
+| ネットワーク | `layerstack` の option | YaneuraOu の `YANEURAOU_EDITION` |
+|---|---|---|
+| `halfkahm2_1024_15_64_progress8ek` | `--feature-set halfka-hm-merged --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin> --ft-out 1024 --l1 16 --l2 64` | `YANEURAOU_ENGINE_SFNN_halfkahm2_1024_15_64_progress8ek` |
+| `halfkahm2_2304_15_64_progress8ek` | 上の `--ft-out` を 2304 にする | `YANEURAOU_ENGINE_SFNN_halfkahm2_2304_15_64_progress8ek` |
+
+`nnue-train` が書く `.bin` は `net_to_yo --assume-progresskpabsq16ek` で変換する
+([詳細](docs/net-to-yaneuraou.md))。変換後のファイルの Network 名は KingRank9 の net と
+同じ `_K3K3` で終わるので、どの bucket 規則かはエンジンに教える必要がある。評価関数の
+directory に `nn.bin` と `progress.bin` を置き、`eval_options.txt` に `LS_BUCKET_MODE progress8ek`
+と書く。既定の `progress8kpabs` のままだと、エンジンは警告なしに読み込み、別の stack を選ぶ。
+
 ネットワーク名は [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) フォークの
 命名 (`NNUE_<feature>_<FT>x2_<H1>_<H2>`、同フォークの
 `source/eval/nnue/architectures/README.md` に説明がある) に従う。同フォークの Makefile は

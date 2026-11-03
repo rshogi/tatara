@@ -152,6 +152,24 @@ use the default `--activation crelu`.
 | `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
 | `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
 
+Two `layerstack` networks are also written in the file layout of the NAGISA
+evaluation files. They route each position to one of 9 stacks: bucket 8 for
+positions where both kings have entered the middle of the board, buckets 0–7
+by game progress, which needs the `progress.bin` that was used in training.
+
+| Network | `layerstack` options | YaneuraOu `YANEURAOU_EDITION` |
+|---|---|---|
+| `halfkahm2_1024_15_64_progress8ek` | `--feature-set halfka-hm-merged --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin> --ft-out 1024 --l1 16 --l2 64` | `YANEURAOU_ENGINE_SFNN_halfkahm2_1024_15_64_progress8ek` |
+| `halfkahm2_2304_15_64_progress8ek` | the same with `--ft-out 2304` | `YANEURAOU_ENGINE_SFNN_halfkahm2_2304_15_64_progress8ek` |
+
+The `.bin` that `nnue-train` writes for these is converted with
+`net_to_yo --assume-progresskpabsq16ek` ([details](docs/net-to-yaneuraou.md)). The
+converted file's network name ends in `_K3K3`, the same as a KingRank9 net, so the
+engine must be told which bucket rule applies: put `LS_BUCKET_MODE progress8ek` and the
+`progress.bin` next to `nn.bin` in the evaluation directory (`eval_options.txt`). With
+the default `progress8kpabs` the engine loads the file without a warning and picks
+different stacks.
+
 The names follow the network naming of the
 [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) fork
 (`NNUE_<feature>_<FT>x2_<H1>_<H2>`, described in its
