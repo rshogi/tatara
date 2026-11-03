@@ -50,9 +50,9 @@ degenerate the WRM to a plain sigmoid, so this configuration uses the same value
 for `--scale`, every `--wrm-*-scaling`, and `--wrm-nnue2score`. When
 `simple --fv-scale` is omitted, `--scale` must equal `--wrm-nnue2score` whether
 or not weights are loaded. The exported `fv_scale` comes from a v9+ `--resume`
-checkpoint when available, then from the `--init-from` input net, and otherwise
-from `round(127 × QB / --scale)`. Set `simple --fv-scale <N>` to always write
-`N` and waive that equality requirement.
+checkpoint when available, then from the `--init-from` input net if it carries
+one, and otherwise from `round(127 × QB / --scale)`. Set `simple --fv-scale <N>`
+to always write `N` and waive that equality requirement.
 
 The derived value is a nominal scale based on the training labels, not
 necessarily the playing-strength optimum. Determine the optimum through games
@@ -111,7 +111,7 @@ change for real training are:
 | `--feature-set` | halfka-hm-merged | Input feature set. Choose from `halfkp` / `halfka-split` / `halfka-merged` / `halfka-hm-split` / `halfka-hm-merged` / `kp` (see the [README](../README.md)) |
 | `--keep-checkpoints` | keep all | Keep the most recent N raw `.ckpt` files (weight + optimizer state). The default of keeping all is the safe choice for tracking training failures. Note that disk usage adds up: with `--save-rate 20` over a 400-superbatch run you accumulate 20 `.ckpt` files × ~1.8 GB (default LayerStack arch) ≈ 36 GB. Limit it if disk space is tight. Quantised `.bin` files are always kept |
 | `--win-rate-model` | OFF (layerstack) / required (simple) | WRM (win-rate-model) loss. Converges to `net_output ≈ cp / --wrm-nnue2score`. On `layerstack` it is optional (without it, plain sigmoid-MSE). The `simple` trainer requires it; when `simple --fv-scale` is omitted, it also requires `--scale = --wrm-nnue2score` whether or not weights are loaded. The example above uses 290 for both, producing `FV_SCALE=28`. See [Tuning the WRM loss](wrm-loss-tuning.md) for the tuning parameters |
-| `--fv-scale` (`simple`) | none | Positive integer evaluation scale written to the exported architecture string. An explicit value always wins. When omitted, the value comes from a v9+ `--resume` checkpoint, then from the `--init-from` input net, and otherwise from `round(127 × QB / --scale)`; omission requires `--scale = --wrm-nnue2score` whether or not weights are loaded. A v9+ checkpoint needs no respecification; with v8 or earlier, repeat an override or the value falls back to the derived value |
+| `--fv-scale` (`simple`) | none | Positive integer evaluation scale written to the exported architecture string. An explicit value always wins. When omitted, the value comes from a v9+ `--resume` checkpoint, then from the `--init-from` input net if it carries one (the evaluation files of some other trainers do not), and otherwise from `round(127 × QB / --scale)`; omission requires `--scale = --wrm-nnue2score` whether or not weights are loaded. A v9+ checkpoint needs no respecification; with v8 or earlier, repeat an override or the value falls back to the derived value |
 | `--optimizer` | ranger | `ranger` (RAdam + lookahead, beta1=0.99), `radam` (rectified Adam without lookahead, beta1=0.9), or `adamw` (Adam without bias correction, beta1=0.9). When resuming from a raw `.ckpt`, pass the same value as the original run |
 | `--score-drop-abs` | none | Exclude positions with `|score| >=` this value from the loss (rejects extreme evaluations near mate) |
 | `--score-clamp-abs` | none | Saturate surviving positions' scores to `[-N, N]` (normalises teacher files whose encode variants clip at different ceilings) |

@@ -2740,7 +2740,7 @@ impl SimpleGpuTrainer {
 
         Ok(SimpleWeights {
             id: export_id,
-            fv_scale: self.fv_scale,
+            fv_scale: Some(self.fv_scale),
             ft_w,
             ft_b,
             l1_w,
@@ -2758,7 +2758,8 @@ impl SimpleGpuTrainer {
     /// と同値 (lookahead が `w == slow` 状態から始まる、`new` と同じ規約)。
     ///
     /// `w.id` が現トレーナの `id` と一致しなければ early reject する (異 topology /
-    /// feature set の weight は受け入れない)。`fv_scale` は受け入れた値で上書きする。
+    /// feature set の weight は受け入れない)。`w.fv_scale` が `Some` なら `fv_scale` をその値で
+    /// 上書きし、`None` (file に token が無かった) なら現在の値をそのまま残す。
     ///
     /// device buffer の layout 変換は [`Self::to_simple_weights`] と逆向きで、L1/L2 weight
     /// は host 側で out-major → in-major に転置してから upload する。
@@ -2857,7 +2858,9 @@ impl SimpleGpuTrainer {
             memset_zero(&self.stream, buf)?;
         }
         self.step_count = 0;
-        self.fv_scale = w.fv_scale;
+        if let Some(fv_scale) = w.fv_scale {
+            self.fv_scale = fv_scale;
+        }
         Ok(())
     }
 

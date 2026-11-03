@@ -75,7 +75,7 @@ sigmoid へ恒等退化させるため、この設定では `--scale`、各
 `--wrm-*-scaling`、`--wrm-nnue2score` に同じ値を使う。`simple --fv-scale` を
 省略した場合は weight 読み込みの有無にかかわらず
 `--scale = --wrm-nnue2score` が必須。書き出す `fv_scale` は v9 以降の
-`--resume` checkpoint に保存された値、`--init-from` の入力 net の値、
+`--resume` checkpoint に保存された値、`--init-from` の入力 net の値 (net が持つ場合)、
 `round(127 × QB / --scale)` の導出値の順に解決する。
 `simple --fv-scale <N>` を明示すると常に `N` を書き出し、この等値要件を免除する。
 v9 以降の checkpoint では再指定不要。v8 以前から resume する場合は override を
@@ -146,9 +146,26 @@ edition 名から architecture header を生成する。あるネットワーク
 別のネットワークの `.bin` を読ませると、`NNUE hash mismatch` と `failed to read nn.bin` で
 拒否される。
 
-他の学習器が書いた `.bin` は `--init-from` で拒否されることがある。同じネットワークでも、
-header の architecture 文字列が tatara の書くものと違い得るため (層の名前、`ModelType=` の
-接頭辞、`fv_scale` の欠落)。
+他の学習器がこれらのネットワーク向けに書いた `.bin` も `--init-from` で読める。次の条件を
+すべて満たすファイルを受け入れる。
+
+- version、network hash、FT hash、FC hash が、指定した `--feature-set`、`simple --arch`、
+  `--activation` から計算した値と一致する。
+- architecture 文字列より後ろのデータの長さが、そのネットワークに必要な長さと過不足なく
+  一致する。
+- architecture 文字列が別の活性化を示していない。hash は活性化を含まないため、
+  `SqrClippedReLU` を含む文字列は `--activation screlu` でなければ、`/2x2]-Pairwise` の
+  特徴変換ブロックを持つ文字列は `--activation pairwise` でなければ拒否する。
+
+それ以外では、ネットワークの同定に architecture 文字列を使わない。`ModelType=` の接頭辞、
+tatara の `AffineTransformSparseInput` に当たる箇所が `AffineTransform` であること、
+`,fv_scale=` が無いこと、の違いは黙って受け入れる。これ以外の違い (例えば層の幅の誤記)
+は受け入れた上で、2 つの文字列を示す警告を stderr に出す。feature set や層の幅が違う
+ファイルは hash が異なるため拒否される。
+
+`,fv_scale=` を持たないファイルは `fv_scale` を供給しない。その場合の書き出しは
+`--init-from` なしの実行と同じ値、`simple --fv-scale` を指定しなければ
+`round(127 × QB / --scale)` になり、起動ログの `fv_scale:` の行にその旨が出る。
 
 ## セットアップ
 
@@ -270,7 +287,7 @@ YaneuraOu にそのまま読める。出力の scale は file ではなく Yaneu
 | **CReLU / SCReLU / Pairwise** | NNUE の活性化関数。CReLU = Clipped ReLU、SCReLU = Squared Clipped ReLU、Pairwise = 前半と後半の要素積で入力次元を半減。`simple` アーキの `--activation` で選択 |
 | **RAdam / Ranger** | Rectified Adam / Ranger optimizer (Ranger = RAdam + lookahead) |
 | **WRM** | Win-rate model loss (bullet `--win-rate-model` 由来) |
-| **QA / QB / FV_SCALE** | 量子化スケール定数。QA = FT weight / bias の量子化 multiplier (`simple` アーキでは活性化で決まる: CReLU / Pairwise は 127、SCReLU は 255)、QB = dense weight の scale (64)。FV_SCALE は net 出力を centipawn 評価値へ戻す係数。`simple` の活性化出力は常に 127-scale のため、既定値は `round(127 × QB / 学習 scale)`。`--fv-scale` で上書きでき、省略時は v9 以降の resume checkpoint、次に `--init-from` の入力 net から値を引き継ぐ |
+| **QA / QB / FV_SCALE** | 量子化スケール定数。QA = FT weight / bias の量子化 multiplier (`simple` アーキでは活性化で決まる: CReLU / Pairwise は 127、SCReLU は 255)、QB = dense weight の scale (64)。FV_SCALE は net 出力を centipawn 評価値へ戻す係数。`simple` の活性化出力は常に 127-scale のため、既定値は `round(127 × QB / 学習 scale)`。`--fv-scale` で上書きでき、省略時は v9 以降の resume checkpoint、次に `--init-from` の入力 net (値を持つ場合) から値を引き継ぐ |
 | **WDL** | Win/Draw/Loss — 対局結果ターゲット (1.0 / 0.5 / 0.0)。WDL lambda で教師 score と blend する。[docs/training-schedule.ja.md](docs/training-schedule.ja.md) を参照 |
 | **FNV-1a** | Fowler–Noll–Vo hash の 1a 版。暗号用途ではない簡単なハッシュで、学習器は resume 用 checkpoint に保存するレシピの指紋に 64 bit 版を使う |
 | **SPRT** | Sequential Probability Ratio Test — 2 つの net を対局させ棋力差を逐次検定する手法。学習済 net の品質確認に使う |

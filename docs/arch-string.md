@@ -10,7 +10,8 @@
   されたかを self-describing に記録する。
 - load 時に、要求するネットワーク spec から同じ手順で arch string を組み立て直し、
   ファイル内の文字列と照合する。不一致なら別物の weight を取り違えて読み込む前に
-  reject する (`load` / `load_quantised` の reject 契約)。
+  reject する (`load` / `load_quantised` の reject 契約)。ただし Simple の `load` は
+  文字列の一致を要求せず、hash と本体の長さで同定する (後述)。
 
 組み立ては `crates/nnue-format` の 2 箇所:
 
@@ -83,7 +84,7 @@ pairwise 乗算で FT 出力が半減することを `/2` と `-Pairwise` suffix
 
 `fv_scale=<N>` は推論時に評価値スケールへ戻す係数。Simple では明示した
 `--fv-scale <N>` が常に最優先で `N` を書き出す。省略時は v9 以降の `--resume`
-checkpoint に保存された値、`--init-from` の入力 net の値、
+checkpoint に保存された値、`--init-from` の入力 net の値 (net が持つ場合)、
 `round(127 × QB / --scale)` (活性化出力が常に 127-scale のため活性化非依存) の順に
 解決する。topology と独立に値が変わるため、**identity 照合には含めない** (後述)。
 
@@ -157,11 +158,20 @@ Simple 固有の点:
 ファイル内の文字列と照合する:
 
 - LayerStack: `Features=...` トークンの前方一致 + network hash で照合する。
-- Simple: identity 部全体の一致で照合する。
+- Simple: version、network hash、FT hash、dense 層群の hash が要求する spec から計算した
+  値と一致し、arch string より後ろのバイト数がそのネットワークに必要な長さと過不足なく
+  一致することを要求する。arch string では、hash が含まない活性化だけを確かめる
+  (`SqrClippedReLU` を含めば SCReLU、FT ブロックが `/2x2]-Pairwise` なら Pairwise、
+  どちらも無ければ CReLU。要求する活性化と違えば reject する)。`ModelType=` の接頭辞、
+  `AffineTransform` と `AffineTransformSparseInput` の違い、`,fv_scale=` の欠落だけが
+  tatara の書く文字列と違うファイルは黙って受け入れる。それ以外の違い (層の幅の誤記など)
+  は受け入れた上で stderr に警告する。
 
 `fv_scale` は学習 scale からの導出、明示 override、checkpoint や入力 net からの
 継承で同一アーキでも変動するため、identity 照合の対象にしない (ファイルには
-記録するが照合では無視する)。
+記録するが照合では無視する)。Simple の `load` は `,fv_scale=` が無いファイルを受け入れ、
+値を作らずに `SimpleWeights::fv_scale = None` を返す。`--init-from` はその場合 `fv_scale` を
+入力 net から引き継がず、`--scale` からの導出値を使う。
 
 ## 関連
 
