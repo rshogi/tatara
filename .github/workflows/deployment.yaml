@@ -1,0 +1,91 @@
+name: Deployment
+
+# master への push (PR の merge) と手動実行で image を GitHub Container Registry (ghcr.io) に公開する。
+# `pull_request: closed` ではなく push を使う理由:
+# - checkout が master 上の merge 後の commit になり、binary に埋め込まれる commit
+#   (`nnue-train build-info`) と image tag の sha が master の履歴に実在する commit になる
+# - GitHub Actions の cache は ref 単位で、PR の ref で保存した cache は他の PR から
+#   読めない。master の ref で保存すれば全 PR の Docker build から読める
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  publish:
+    name: Build & Push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # persist-credentials: false にしないと GITHUB_TOKEN が .git/config に残り、
+      # Dockerfile の `COPY . /src` で build stage の layer に入る。
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # tag 用の version は nnue-train の package version。
+      - name: Read version
+        id: pkg
+        run: |
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('bins/nnue_train/Cargo.toml', 'rb'))['package']['version'])")
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # CUDA の devel / runtime 両 base image の展開だけで 15 GB 近くになり、
+      # runner 既定の空き容量では足りない。使わない大物を先に消す。
+      - name: Free disk space
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # version と latest は master の build だけに付ける。別 branch からの手動実行は
+      # sha tag だけを作り、master の image を上書きしない。
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.pkg.outputs.version }},enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+
+      - uses: docker/setup-buildx-action@v3
+
+      # context を明示するのは、省略時の Git context が `.git` を含めずに clone するため。
+      # build.rs が `.git` から commit と dirty flag を読むので、checkout した作業ツリーを
+      # そのまま渡す。
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          # mode=max は build stage を含む全 layer を保存する。CUDA の devel image は
+          # 数 GB あり、Actions cache の 10 GB 枠を単独で使い切り得る。mode=min は公開する
+          # image の layer だけを保存し、ignore-error は cache の保存失敗で push まで
+          # 失敗させないためのもの。
+          cache-to: type=gha,mode=min,ignore-error=true

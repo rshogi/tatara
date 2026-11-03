@@ -131,7 +131,8 @@ native CUDA C++ の build command、cuda-oxide のセットアップ、OS 別の
 ### ビルドと学習
 
 kernel のビルドと smoke test は [docs/setup.ja.md](docs/setup.ja.md)、学習の回し方は
-[docs/training-quickstart.ja.md](docs/training-quickstart.ja.md) を参照。
+[docs/training-quickstart.ja.md](docs/training-quickstart.ja.md) を参照。build せずに
+コンテナで動かす場合は [docs/setup.ja.md](docs/setup.ja.md#docker-image) の「Docker image」を参照。
 
 ## ドキュメント
 

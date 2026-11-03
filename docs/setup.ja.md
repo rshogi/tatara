@@ -24,6 +24,64 @@ macOS は SSH / エディタとして使う。CPU-only crate (`shogi-format` /
 macOS でも可能だが、`cargo build` を workspace 全体に掛けると CUDA 依存の
 ビルドで失敗する。
 
+## Docker image
+
+リポジトリ直下の `Dockerfile` は `nnue-train` と workspace のその他の binary
+(`net_to_yo`、`net_from_yo`、`net_fv_scale`、`ckpt_average`、`eval_sfen`、
+`progress-kpabs-train` など) を 1 つの image にまとめる。image が持つのは CUDA 12.9 の
+runtime library (cuBLAS) のみで toolchain は含まないため、host に要るのは CUDA 12.9
+に対応した NVIDIA driver と
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+だけ。
+
+```bash
+docker pull ghcr.io/rshogi/tatara:latest
+# 自分で build してもよい (build に GPU は要らない)
+docker build -t tatara .
+```
+
+image 名の後ろはすべて `nnue-train` に渡される。`--data` を付けずに `simple` を
+実行すると GPU smoke test が走り、`[smoke/simple] PASSED` で終わる。
+
+```bash
+docker run --rm --gpus all ghcr.io/rshogi/tatara simple
+```
+
+学習するときは、教師データを read-only で、出力先をコンテナより長く残る
+directory として mount し、どちらもコンテナ内の path で指定する
+(option は [training quickstart](training-quickstart.ja.md) に従う)。
+
+```bash
+docker run --rm --gpus all --user "$(id -u):$(id -g)" \
+  -v /path/to/data:/data:ro -v /path/to/out:/out \
+  ghcr.io/rshogi/tatara \
+  --data /data/shuffled-psv.bin --output /out --net-id <run-name> \
+  --threads <N> \
+  ... simple
+```
+
+| flag | 理由 |
+|---|---|
+| `--gpus all` (または `--gpus device=<N>`) | 必須。NVIDIA container runtime が driver の library を注入する。無いと起動時に `libcuda.so.1: cannot open shared object file` で落ちる。`build-info` も同じ |
+| `--threads <N>` | コンテナ外と同じく必ず設定する。training quickstart の「主な option」を参照 |
+| `--user "$(id -u):$(id -g)"` | コンテナは既定で root で動くため、指定しないと mount した出力先の checkpoint が root 所有になる |
+| `--output` 用の `-v <host>:<container>` | checkpoint と resume 状態は `--rm` の後も残す必要がある |
+| `--shm-size` | 不要。data loader は 1 プロセス内の thread で decode し共有メモリを使わないので、Docker 既定の 64 MB で足りる |
+
+その他の tool も同じ image に入っていて、`--entrypoint` で選ぶ。
+例: `docker run --rm --entrypoint net_to_yo ghcr.io/rshogi/tatara --help`。
+
+kernel は compute capability 8.0 向けの PTX として埋め込まれ (Dockerfile の
+`TATARA_CUDA_COMPUTE`)、初回起動時に driver が搭載 GPU 向けにコンパイルするので、
+Ampere 以降の GPU ならそのまま動く。Turing の GPU では
+`docker build --build-arg TATARA_CUDA_COMPUTE=75 -t tatara .` で build する。
+
+build は git commit と dirty flag を binary に埋め込む
+([Trainer build provenance](trainer-build-provenance.md) 参照) ため、自前の `.git`
+directory を持つ checkout から実行する。source archive や linked worktree では build が
+その旨のメッセージを出して止まる。埋め込まれた commit は
+`docker run --rm --gpus all <image> build-info` で確認できる。
+
 ## Windows native (実験的)
 
 `native` feature は cuda-oxide を使わず、NVCC で build した CUDA C++
