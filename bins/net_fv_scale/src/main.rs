@@ -585,7 +585,7 @@ mod tests {
         let output = rewrite_fv_scale(&input, Rewrite::Set(37)).unwrap();
         let loaded = SimpleWeights::load(&mut std::io::Cursor::new(&output), id).unwrap();
 
-        assert_eq!(loaded.fv_scale, 37);
+        assert_eq!(loaded.fv_scale, Some(37));
         assert!(arch_str(&output).ends_with(",fv_scale=37"));
     }
 

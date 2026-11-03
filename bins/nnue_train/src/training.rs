@@ -103,6 +103,21 @@ fn simple_fv_scale_after_load(
     override_value.or(checkpoint_value).unwrap_or(loaded_value)
 }
 
+/// 実効 `fv_scale` が `--scale` からの導出値になるか。`--fv-scale`、raw checkpoint、
+/// `--init-from` の .bin のどれも値を持たないときに真。`--init-from` の .bin は、
+/// arch 文字列に `,fv_scale=` を持たない (他の trainer が書いた) ときは値を持たない。
+#[cfg(any(feature = "gpu", test))]
+fn simple_fv_scale_is_derived(
+    override_value: Option<i32>,
+    checkpoint_value: Option<i32>,
+    init_from: bool,
+    init_net_lacks_fv_scale: bool,
+) -> bool {
+    override_value.is_none()
+        && checkpoint_value.is_none()
+        && (!init_from || init_net_lacks_fv_scale)
+}
+
 #[cfg(any(feature = "gpu", test))]
 fn validate_simple_effective_fv_scale(
     fv_scale: i32,
@@ -2446,6 +2461,8 @@ pub(crate) fn run_simple_training(
     })?;
     trainer.wdl_ignore_draws = cli.wdl_ignore_draws;
 
+    // `--init-from` の .bin が arch 文字列に `,fv_scale=` を持たなかったとき真。
+    let mut init_net_lacks_fv_scale = false;
     let (resumed_superbatch, resume_producer, resumed_lr_horizon, checkpoint_fv_scale): (
         Option<usize>,
         Option<crate::ckpt::ResumeProducer>,
@@ -2458,6 +2475,7 @@ pub(crate) fn run_simple_training(
         );
         let mut reader = std::io::BufReader::new(std::fs::File::open(init)?);
         let weights = SimpleWeights::load(&mut reader, id)?;
+        init_net_lacks_fv_scale = weights.fv_scale.is_none();
         trainer.load_simple_weights(&weights)?;
         (None, None, None, None)
     } else if let Some(ckpt) = &cli.resume {
@@ -2477,20 +2495,32 @@ pub(crate) fn run_simple_training(
         checkpoint_fv_scale,
         trainer.fv_scale(),
     );
+    let fv_scale_is_derived = simple_fv_scale_is_derived(
+        simple_args.fv_scale,
+        checkpoint_fv_scale,
+        cli.init_from.is_some(),
+        init_net_lacks_fv_scale,
+    );
     let fv_scale_source = if simple_args.fv_scale.is_some() {
         "the --fv-scale override"
     } else if checkpoint_fv_scale.is_some() {
         "the raw checkpoint"
-    } else if cli.init_from.is_some() {
+    } else if !fv_scale_is_derived {
         "the --init-from .bin"
     } else {
         "the --scale-derived value"
     };
     validate_simple_effective_fv_scale(effective_fv_scale, fv_scale_source, cli.scale)?;
     trainer.set_fv_scale(effective_fv_scale);
-    println!("[train] fv_scale: {}", trainer.fv_scale());
-    let fv_scale_is_derived =
-        simple_args.fv_scale.is_none() && cli.init_from.is_none() && checkpoint_fv_scale.is_none();
+    if init_net_lacks_fv_scale && fv_scale_is_derived {
+        println!(
+            "[train] fv_scale: {} (the --init-from .bin has no fv_scale; \
+             using the --scale-derived value)",
+            trainer.fv_scale()
+        );
+    } else {
+        println!("[train] fv_scale: {}", trainer.fv_scale());
+    }
     if let Some(warning) = simple_fv_scale_warning(cli, fv_scale_is_derived) {
         eprintln!("[train] warning: {warning}");
     }
@@ -2659,6 +2689,18 @@ mod shared_cli_tests {
         assert_eq!(simple_fv_scale_after_load(None, Some(14), derived), 14);
         assert_eq!(simple_fv_scale_after_load(None, None, derived), derived);
         assert_eq!(simple_fv_scale_after_load(None, None, loaded_from_bin), 7);
+    }
+
+    #[test]
+    fn simple_fv_scale_is_derived_unless_something_supplies_a_value() {
+        // 新規学習と、値を持たない .bin からの --init-from は --scale からの導出になる。
+        assert!(simple_fv_scale_is_derived(None, None, false, false));
+        assert!(simple_fv_scale_is_derived(None, None, true, true));
+        // 値を持つ .bin、raw checkpoint、--fv-scale は導出ではない。
+        assert!(!simple_fv_scale_is_derived(None, None, true, false));
+        assert!(!simple_fv_scale_is_derived(None, Some(14), false, false));
+        assert!(!simple_fv_scale_is_derived(Some(21), None, true, true));
+        assert!(!simple_fv_scale_is_derived(Some(21), None, false, false));
     }
 
     #[test]

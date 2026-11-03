@@ -33,20 +33,31 @@ GPU kernel を hand-fuse することで **極めて高速** — 実測した cu
 **実効 throughput** (`--batch-size 65536`, pos/s; fp32 → `--all-optim`(fp16/tf32))。
 `--all-optim` の効果は帯域律速の強い旧世代 GPU ほど、また net が大きいほど大きい:
 
-| arch / 構成 (feature) | RTX 5090 | RTX 3080 Ti |
-|---|---|---|
-| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 2.45M → 3.13M (+28%) | 0.99M → 1.59M (+61%) |
-| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 4.24M → 5.10M (+20%) | 2.05M → 2.97M (+45%) |
-| Simple `256x2-32-32` (`halfkp`) | 11.29M → 13.37M (+18%) | 7.30M → 10.10M (+38%) |
+| arch / 構成 (feature) | RTX 5090 | RTX 3080 Ti | RTX 4070 Ti |
+|---|---|---|---|
+| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 2.45M → 3.13M (+28%) | 0.99M → 1.59M (+61%) | 1.26M → 2.14M (+70%) |
+| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 4.24M → 5.10M (+20%) | 2.05M → 2.97M (+45%) | 2.69M → 4.14M (+54%) |
+| Simple `256x2-32-32` (`halfkp`) | 11.29M → 13.37M (+18%) | 7.30M → 10.10M (+38%) | 5.79M → 7.85M (+35%) |
+| Simple `256x2-32-32` (`kp`) | – | – | 6.69M → 6.15M (−8%) |
+
+RTX 4070 Ti (12 GB) の列は、下の計測コマンドを教師 file を page cache に載せた状態で
+`--superbatches 3` (`--batches-per-superbatch` は LayerStack が 60、Simple が 150) で
+2 回回した平均。2 回の差は最大 0.2%。特徴変換器が 1,710 行しかない `kp` では、
+`--all-optim` が fp32 より遅かった。`–` は未測定。
+
+教師 file の 1 局面は 40 バイトなので、600 万局面/秒で学習すると約 240 MB/s を読む。
+これより遅いストレージではそれが上限になり、100 MB/s なら約 250 万局面/秒までになる。
+ハードディスクでは追いつかないことがある。SSD、速いネットワークストレージ、page cache に
+収まる教師 file なら律速にならない。
 
 計測コマンド (教師データ / progress は環境依存 path、`--all-optim` の有無で pos/s を比較):
 
 ```sh
 # LayerStack (halfka-hm-merged, progress 必要)
 cargo run --release --bin nnue-train -- \
-  --data /path/to/teacher.psv --progress-coeff /path/to/progress.bin \
+  --data /path/to/teacher.psv \
   --feature-set halfka-hm-merged --batch-size 65536 --superbatches 8 [--all-optim] \
-  layerstack --ft-out {1536|768} --l1 {16|8} --l2 32
+  layerstack --progress-coeff /path/to/progress.bin --ft-out {1536|768} --l1 {16|8} --l2 32
 
 # HalfKP (simple, progress 不要; simple トレーナは --win-rate-model 必須)
 cargo run --release --bin nnue-train -- \
@@ -64,7 +75,7 @@ sigmoid へ恒等退化させるため、この設定では `--scale`、各
 `--wrm-*-scaling`、`--wrm-nnue2score` に同じ値を使う。`simple --fv-scale` を
 省略した場合は weight 読み込みの有無にかかわらず
 `--scale = --wrm-nnue2score` が必須。書き出す `fv_scale` は v9 以降の
-`--resume` checkpoint に保存された値、`--init-from` の入力 net の値、
+`--resume` checkpoint に保存された値、`--init-from` の入力 net の値 (net が持つ場合)、
 `round(127 × QB / --scale)` の導出値の順に解決する。
 `simple --fv-scale <N>` を明示すると常に `N` を書き出し、この等値要件を免除する。
 v9 以降の checkpoint では再指定不要。v8 以前から resume する場合は override を
@@ -113,6 +124,49 @@ v9 以降の checkpoint では再指定不要。v8 以前から resume する場
 [nodchip 氏の記事](https://nodchip.hatenablog.com/entry/2026/02/04/000000) の
 アイデアに基づく。
 
+### YaneuraOu で読めるネットワーク
+
+`--feature-set` だけではネットワークは決まらない。特徴変換器と 2 つの隠れ層の幅も
+ネットワークの一部で、YaneuraOu のビルドはちょうど 1 つのネットワーク向けにコンパイル
+される。次の 4 つの `simple` ネットワークは、同名の YaneuraOu 評価関数ファイルと同じ
+file 構造で書き出すので、表の edition でビルドしたエンジンが変換なしで読み込める。
+4 つとも既定の `--activation crelu` を使う。
+
+| ネットワーク | `--feature-set` | `simple --arch` | YaneuraOu の `YANEURAOU_EDITION` |
+|---|---|---|---|
+| `halfkp_128x2_32_32` | `halfkp` | `128x2-32-32` | `YANEURAOU_ENGINE_NNUE_halfkp_128x2_32_32` |
+| `halfkp_256x2_32_32` | `halfkp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE` |
+| `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
+| `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
+
+ネットワーク名は [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) フォークの
+命名 (`NNUE_<feature>_<FT>x2_<H1>_<H2>`、同フォークの
+`source/eval/nnue/architectures/README.md` に説明がある) に従う。同フォークの Makefile は
+edition 名から architecture header を生成する。あるネットワーク向けにビルドしたエンジンに
+別のネットワークの `.bin` を読ませると、`NNUE hash mismatch` と `failed to read nn.bin` で
+拒否される。
+
+他の学習器がこれらのネットワーク向けに書いた `.bin` も `--init-from` で読める。次の条件を
+すべて満たすファイルを受け入れる。
+
+- version、network hash、FT hash、FC hash が、指定した `--feature-set`、`simple --arch`、
+  `--activation` から計算した値と一致する。
+- architecture 文字列より後ろのデータの長さが、そのネットワークに必要な長さと過不足なく
+  一致する。
+- architecture 文字列が別の活性化を示していない。hash は活性化を含まないため、
+  `SqrClippedReLU` を含む文字列は `--activation screlu` でなければ、`/2x2]-Pairwise` の
+  特徴変換ブロックを持つ文字列は `--activation pairwise` でなければ拒否する。
+
+それ以外では、ネットワークの同定に architecture 文字列を使わない。`ModelType=` の接頭辞、
+tatara の `AffineTransformSparseInput` に当たる箇所が `AffineTransform` であること、
+`,fv_scale=` が無いこと、の違いは黙って受け入れる。これ以外の違い (例えば層の幅の誤記)
+は受け入れた上で、2 つの文字列を示す警告を stderr に出す。feature set や層の幅が違う
+ファイルは hash が異なるため拒否される。
+
+`,fv_scale=` を持たないファイルは `fv_scale` を供給しない。その場合の書き出しは
+`--init-from` なしの実行と同じ値、`simple --fv-scale` を指定しなければ
+`round(127 × QB / --scale)` になり、起動ログの `fv_scale:` の行にその旨が出る。
+
 ## セットアップ
 
 ### 環境要件
@@ -132,7 +186,56 @@ native CUDA C++ の build command、cuda-oxide のセットアップ、OS 別の
 
 kernel のビルドと smoke test は [docs/setup.ja.md](docs/setup.ja.md)、学習の回し方は
 [docs/training-quickstart.ja.md](docs/training-quickstart.ja.md) を参照。build せずに
-コンテナで動かす場合は [docs/setup.ja.md](docs/setup.ja.md#docker-image) の「Docker image」を参照。
+コンテナで学習する場合は、下の「Docker で学習する」を参照。
+
+### Docker で学習する
+
+GitHub Container Registry の image に `nnue-train` とこの workspace の各ツールが入っている。
+CUDA 12.9 に対応した NVIDIA driver と
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+がある machine なら、toolchain 無しで学習できる。
+
+```bash
+docker pull ghcr.io/rshogi/tatara:latest
+
+# GPU の smoke test。データ不要で、最後に "[smoke/simple] PASSED" と出る
+docker run --rm --gpus all ghcr.io/rshogi/tatara:latest simple
+```
+
+image 名より後ろの引数はすべて `nnue-train` に渡る。教師データは読み取り専用で、出力先は
+container が消えても残る directory で mount し、どちらも container 内の path で指定する。
+`--data` は PSV を 1 file だけ取るので、shard は先に連結する (`cat shard-*.psv > train.psv`)。
+次は `kp_256x2_32_32` を学習する例。別のネットワークにするときは、上の
+「YaneuraOu で読めるネットワーク」の表のとおり `--feature-set` と `--arch` を変える:
+
+```bash
+docker run --rm --gpus all --user "$(id -u):$(id -g)" \
+  -v /path/to/data:/data:ro -v /path/to/out:/out \
+  ghcr.io/rshogi/tatara:latest \
+  --data /data/train.psv --test-data /data/val.psv \
+  --output /out --net-id kp256 \
+  --feature-set kp --superbatches <N> --batch-size 65536 --threads <N> \
+  --scale 290 --win-rate-model \
+  --wrm-in-offset 0 --wrm-target-offset 0 \
+  --wrm-in-scaling 290 --wrm-target-scaling 290 --wrm-nnue2score 290 \
+  simple --arch 256x2-32-32
+```
+
+- `--test-data` は検証用の file で、損失をスーパーバッチごとに表示する。省けば検証なしで学習する。
+- `--threads` は教師データを読み込む thread 数。必ず指定する。読み込みが律速になりやすく、
+  物理 core 数が出発点になる。
+- 1 スーパーバッチは `--batches-per-superbatch` バッチ (既定 6104) で、`--batch-size 65536`
+  なら約 4 億局面。
+- `--save-rate` スーパーバッチごと (既定 20) と最後に、出力先に `<net-id>-<superbatch>.bin`
+  (量子化した net) と `<net-id>-<superbatch>.ckpt` (再開用の状態) ができる。
+- 起動時の log に、`--scale 290` なら `fv_scale: 28` と出る。YaneuraOu は file から `fv_scale` を
+  読まないので、同じ値を USI option `FV_SCALE` で渡す。
+- ほかのツールも同じ image に入っている:
+  `docker run --rm --entrypoint net_to_yo ghcr.io/rshogi/tatara:latest --help`。
+
+GPU の選び方、他の世代の GPU、image を自分で build する方法は
+[docs/setup.ja.md](docs/setup.ja.md#docker-image) の「Docker image」、学習の option は
+[docs/training-quickstart.ja.md](docs/training-quickstart.ja.md) にある。
 
 ## ドキュメント
 
@@ -161,6 +264,9 @@ tatara が出力する量子化 `.bin` は [rshogi](https://github.com/SH11235/r
 限らず、アーキテクチャによっては推論部の追加実装をしないとロードできない。
 対応する 1536-16-32 LayerStack は
 [`net_to_yo`](docs/net-to-yaneuraou.md) で変換できる。
+「YaneuraOu で読めるネットワーク」の表にある `simple` ネットワークは、対応する edition の
+YaneuraOu にそのまま読める。出力の scale は file ではなく YaneuraOu の `FV_SCALE` option で
+決まる。
 学習済みの参考 net は
 [GitHub Releases](https://github.com/SH11235/tatara/releases) に添付している。
 自分で net を学習する場合の環境構築は [docs/setup.ja.md](docs/setup.ja.md) を参照。
@@ -181,7 +287,7 @@ tatara が出力する量子化 `.bin` は [rshogi](https://github.com/SH11235/r
 | **CReLU / SCReLU / Pairwise** | NNUE の活性化関数。CReLU = Clipped ReLU、SCReLU = Squared Clipped ReLU、Pairwise = 前半と後半の要素積で入力次元を半減。`simple` アーキの `--activation` で選択 |
 | **RAdam / Ranger** | Rectified Adam / Ranger optimizer (Ranger = RAdam + lookahead) |
 | **WRM** | Win-rate model loss (bullet `--win-rate-model` 由来) |
-| **QA / QB / FV_SCALE** | 量子化スケール定数。QA = FT weight / bias の量子化 multiplier (`simple` アーキでは活性化で決まる: CReLU / Pairwise は 127、SCReLU は 255)、QB = dense weight の scale (64)。FV_SCALE は net 出力を centipawn 評価値へ戻す係数。`simple` の活性化出力は常に 127-scale のため、既定値は `round(127 × QB / 学習 scale)`。`--fv-scale` で上書きでき、省略時は v9 以降の resume checkpoint、次に `--init-from` の入力 net から値を引き継ぐ |
+| **QA / QB / FV_SCALE** | 量子化スケール定数。QA = FT weight / bias の量子化 multiplier (`simple` アーキでは活性化で決まる: CReLU / Pairwise は 127、SCReLU は 255)、QB = dense weight の scale (64)。FV_SCALE は net 出力を centipawn 評価値へ戻す係数。`simple` の活性化出力は常に 127-scale のため、既定値は `round(127 × QB / 学習 scale)`。`--fv-scale` で上書きでき、省略時は v9 以降の resume checkpoint、次に `--init-from` の入力 net (値を持つ場合) から値を引き継ぐ |
 | **WDL** | Win/Draw/Loss — 対局結果ターゲット (1.0 / 0.5 / 0.0)。WDL lambda で教師 score と blend する。[docs/training-schedule.ja.md](docs/training-schedule.ja.md) を参照 |
 | **FNV-1a** | Fowler–Noll–Vo hash の 1a 版。暗号用途ではない簡単なハッシュで、学習器は resume 用 checkpoint に保存するレシピの指紋に 64 bit 版を使う |
 | **SPRT** | Sequential Probability Ratio Test — 2 つの net を対局させ棋力差を逐次検定する手法。学習済 net の品質確認に使う |

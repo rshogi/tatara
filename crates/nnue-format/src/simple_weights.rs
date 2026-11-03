@@ -173,8 +173,8 @@ impl SimpleActivation {
 // SimpleId — Simple ネットの構造化 identity
 // =============================================================================
 
-/// Simple ネットの identity を成す構造化フィールド。`load` の reject 契約は
-/// この値を file の arch 文字列・hash と照合する。
+/// Simple ネットの identity を成す構造化フィールド。`load` はこの値から計算した
+/// version・hash・本体の長さ・活性化と file の内容を照合する。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SimpleId {
     /// 入力 feature set (FT 入力次元 `ft_in` と feature hash の源)。
@@ -208,7 +208,7 @@ impl SimpleId {
 // =============================================================================
 
 /// arch 文字列の identity 部 (feature / 層次元 / 活性化を含み、`fv_scale` を含まない)。
-/// `load` の reject 契約はこの部分を照合する。
+/// `load` は他の trainer が書いたファイルの文字列をこの部分と見比べ、食い違いを警告する。
 fn arch_identity(id: &SimpleId) -> String {
     let ft_in = id.ft_in();
     let ft_out = id.ft_out;
@@ -253,6 +253,109 @@ fn arch_identity(id: &SimpleId) -> String {
 /// スケールで identity には含めない (同一 topology でも変動する)。
 pub fn build_arch_str(id: &SimpleId, fv_scale: i32) -> String {
     format!("{},fv_scale={}", arch_identity(id), fv_scale)
+}
+
+/// 他の trainer が書いたファイルの arch 文字列を `expected` と照合した結果。
+#[derive(Debug, PartialEq, Eq)]
+struct ArchTextReport {
+    /// 末尾の `,fv_scale=N` token の値。token が無ければ `None`。
+    fv_scale: Option<i32>,
+    /// 文字列が示す活性化 ([`activation_named_by`])。
+    activation: SimpleActivation,
+    /// 許容する書き方の違い ([`tolerated_form`]) を除いても `expected` の arch 文字列と
+    /// 食い違う箇所の説明。食い違いが無ければ `None`。
+    difference: Option<String>,
+}
+
+/// arch 文字列が示す活性化。`SqrClippedReLU` を含めば SCReLU、FT ブロックが
+/// `/2x2]-Pairwise` で終われば Pairwise、どちらも無ければ CReLU。
+///
+/// network hash は活性化を含まない (CReLU と SCReLU の 256x2-32-32 は hash も本体の
+/// バイト数も同一) ため、FT の量子化 scale (QA) を決めるこの区別は文字列だけが担う。
+/// 両方の印を持つ文字列は tatara が書く形ではなく QA を決められないので `Err`。
+fn activation_named_by(arch_text: &str) -> io::Result<SimpleActivation> {
+    let squared = arch_text.contains("SqrClippedReLU");
+    let pairwise = arch_text.contains("/2x2]-Pairwise");
+    match (squared, pairwise) {
+        (true, true) => Err(invalid(format!(
+            "arch_str names both SqrClippedReLU and a Pairwise feature block, so its \
+             activation is ambiguous: `{arch_text}`"
+        ))),
+        (true, false) => Ok(SimpleActivation::SCReLU),
+        (false, true) => Ok(SimpleActivation::Pairwise),
+        (false, false) => Ok(SimpleActivation::CReLU),
+    }
+}
+
+/// 同じネットワークを指しうる書き方の違いを畳んだ arch 文字列。
+///
+/// - 先頭の `ModelType=<name>;` を落とす (YaneuraOu 系の trainer が付ける)。
+/// - `AffineTransformSparseInput[` を `AffineTransform[` に揃える (疎入力に対する最適化の
+///   有無の違いで、重みの並びは同じ)。
+fn tolerated_form(arch_text: &str) -> String {
+    let body = match arch_text
+        .strip_prefix("ModelType=")
+        .and_then(|rest| rest.split_once(';'))
+    {
+        Some((_, rest)) => rest,
+        None => arch_text,
+    };
+    body.replace("AffineTransformSparseInput[", "AffineTransform[")
+}
+
+/// 2 つの文字列が最初に食い違う位置の前後を抜き出して説明する。
+fn describe_first_difference(file: &str, want: &str) -> String {
+    let at = file
+        .chars()
+        .zip(want.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let excerpt =
+        |text: &str| -> String { text.chars().skip(at.saturating_sub(24)).take(56).collect() };
+    format!(
+        "the file has `...{}` where this network is written as `...{}`",
+        excerpt(file),
+        excerpt(want)
+    )
+}
+
+/// file の arch 文字列を解釈する。`,fv_scale=N` があれば値を検証して取り出し、
+/// 無ければ `None` とする。
+fn inspect_arch_text(arch_str: &str, expected: &SimpleId) -> io::Result<ArchTextReport> {
+    let (arch_text, fv_scale) = match arch_str.rsplit_once(",fv_scale=") {
+        Some((arch_text, fv_scale_str)) => {
+            let fv_scale: i32 = fv_scale_str
+                .parse()
+                .map_err(|_| invalid(format!("invalid fv_scale in arch_str: `{fv_scale_str}`")))?;
+            if fv_scale <= 0 {
+                return Err(invalid(format!(
+                    "invalid fv_scale in arch_str: `{fv_scale_str}` (must be positive)"
+                )));
+            }
+            (arch_text, Some(fv_scale))
+        }
+        None => (arch_str, None),
+    };
+    let activation = activation_named_by(arch_text)?;
+    let file_form = tolerated_form(arch_text);
+    let expected_form = tolerated_form(&arch_identity(expected));
+    let difference =
+        (file_form != expected_form).then(|| describe_first_difference(&file_form, &expected_form));
+    Ok(ArchTextReport {
+        fv_scale,
+        activation,
+        difference,
+    })
+}
+
+/// `id` のネットワークで arch 文字列より後ろ (`ft_hash` から末尾まで) が占めるバイト数。
+fn body_len(id: &SimpleId) -> usize {
+    let ft = 4 + 2 * (id.ft_out + id.ft_in() * id.ft_out);
+    let fc_hash = 4;
+    let l1 = 4 * id.l1_out + id.l1_out * pad32(id.combined_dim());
+    let l2 = 4 * id.l2_out + id.l2_out * pad32(id.l1_out);
+    let l3 = 4 + pad32(id.l2_out);
+    ft + fc_hash + l1 + l2 + l3
 }
 
 /// dense 層群の topology hash (nnue-pytorch 系)。
@@ -314,8 +417,11 @@ pub fn network_hash(id: &SimpleId) -> u32 {
 pub struct SimpleWeights {
     /// この weight の構造化 identity。
     pub id: SimpleId,
-    /// 推論時の評価値スケール。通常は [`simple_fv_scale`] で算出し、arch 文字列に記録する。
-    pub fv_scale: i32,
+    /// 推論時の評価値スケール。通常は [`simple_fv_scale`] で算出し、arch 文字列に
+    /// `,fv_scale=N` として記録する。他の trainer が書いたファイルはこの token を
+    /// 持たないことがあり、その場合 `load` は値を作らず `None` を返す。`None` の
+    /// weight を `save_quantised` すると token も書かない。
+    pub fv_scale: Option<i32>,
     pub ft_w: Vec<f32>,
     pub ft_b: Vec<f32>,
     pub l1_w: Vec<f32>,
@@ -331,7 +437,7 @@ impl SimpleWeights {
     pub fn zeroed(id: SimpleId, fv_scale: i32) -> Self {
         Self {
             id,
-            fv_scale,
+            fv_scale: Some(fv_scale),
             ft_w: vec![0.0; id.ft_in() * id.ft_out],
             ft_b: vec![0.0; id.ft_out],
             l1_w: vec![0.0; id.l1_out * id.combined_dim()],
@@ -378,7 +484,11 @@ impl SimpleWeights {
         // ---- header ----
         writer.write_all(&NNUE_VERSION.to_le_bytes())?;
         writer.write_all(&network_hash(id).to_le_bytes())?;
-        let arch_bytes = build_arch_str(id, self.fv_scale).into_bytes();
+        let arch_bytes = match self.fv_scale {
+            Some(fv_scale) => build_arch_str(id, fv_scale),
+            None => arch_identity(id),
+        }
+        .into_bytes();
         writer.write_all(&(arch_bytes.len() as u32).to_le_bytes())?;
         writer.write_all(&arch_bytes)?;
 
@@ -429,8 +539,24 @@ impl SimpleWeights {
     }
 
     /// Simple quantised binary を parse する。`expected` は要求する identity
-    /// (feature set / 活性化 / 層次元)。file の version・hash・arch identity が
-    /// `expected` 由来の値と一致しなければ `InvalidData` で reject する。
+    /// (feature set / 活性化 / 層次元)。
+    ///
+    /// 次のいずれかに当たる file は `InvalidData` (短い file は `UnexpectedEof`) で reject する。
+    ///
+    /// - version が [`NNUE_VERSION`] でない。
+    /// - network hash・FT hash・dense 層群の hash のどれかが `expected` から計算した値と違う。
+    ///   feature set と層次元の違いはここで落ちる。
+    /// - arch 文字列より後ろの長さが `expected` のネットワークに要るバイト数と違う
+    ///   (足りない、または余る)。
+    /// - arch 文字列が示す活性化が `expected.activation` と違う。hash は活性化を含まない
+    ///   ため、CReLU と SCReLU の取り違えを防ぐのはこの照合だけである。
+    /// - `,fv_scale=N` の `N` が正の整数でない。
+    ///
+    /// arch 文字列そのものは同一性の根拠にしない。hash と長さが合うなら、`ModelType=` の
+    /// 接頭辞、`AffineTransform` と `AffineTransformSparseInput` の違い、`,fv_scale=` の
+    /// 欠落だけが異なるファイルは黙って受け入れ、それ以外の違い (例えば次元の誤記) は
+    /// 受け入れた上で stderr に警告する。`,fv_scale=` が無いファイルの
+    /// [`SimpleWeights::fv_scale`] は `None` になる。
     pub fn load<R: Read>(reader: &mut R, expected: SimpleId) -> io::Result<Self> {
         let mut buf4 = [0u8; 4];
 
@@ -464,24 +590,17 @@ impl SimpleWeights {
         reader.read_exact(&mut arch_bytes)?;
         let arch_str = String::from_utf8(arch_bytes)
             .map_err(|e| invalid(format!("arch_str is not valid UTF-8: {e}")))?;
-        // identity 部 (`,fv_scale=` の手前) を expected から組んだ値と照合する。
-        let (file_identity, fv_scale_str) = arch_str
-            .rsplit_once(",fv_scale=")
-            .ok_or_else(|| invalid(format!("arch_str missing fv_scale field: `{arch_str}`")))?;
-        let expected_identity = arch_identity(&expected);
-        if file_identity != expected_identity {
+        // version と hash が合えば YaneuraOu は文字列を見ずに読み込むため、ここでも文字列の
+        // 食い違いは拒否の理由にしない。ただし活性化は hash に現れないので文字列で確かめる。
+        let arch = inspect_arch_text(&arch_str, &expected)?;
+        if arch.activation != expected.activation {
             return Err(invalid(format!(
-                "arch identity mismatch: file `{file_identity}`, expected `{expected_identity}`"
+                "activation mismatch: the arch_str of the file names {}, expected {}: `{arch_str}`",
+                arch.activation.canonical_name(),
+                expected.activation.canonical_name()
             )));
         }
-        let fv_scale: i32 = fv_scale_str
-            .parse()
-            .map_err(|_| invalid(format!("invalid fv_scale in arch_str: `{fv_scale_str}`")))?;
-        if fv_scale <= 0 {
-            return Err(invalid(format!(
-                "invalid fv_scale in arch_str: `{fv_scale_str}` (must be positive)"
-            )));
-        }
+        let fv_scale = arch.fv_scale;
 
         // ft_hash
         reader.read_exact(&mut buf4)?;
@@ -523,6 +642,32 @@ impl SimpleWeights {
         let l2_w = read_i8_weight(reader, expected.l2_out, expected.l1_out, weight_scale)?;
         let l3_b = read_i32_bias(reader, 1, bias_scale)?;
         let l3_w = read_i8_weight(reader, 1, expected.l2_out, weight_scale)?;
+
+        // 期待する本体を読み切った後に 1 バイトでも残っていれば、別のネットワークの
+        // ファイルか壊れたファイルなので拒否する。
+        let mut probe = [0u8; 1];
+        loop {
+            match reader.read(&mut probe) {
+                Ok(0) => break,
+                Ok(_) => {
+                    return Err(invalid(format!(
+                        "trailing bytes after the {} bytes this network needs after the arch_str",
+                        body_len(&expected)
+                    )));
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        if let Some(difference) = arch.difference {
+            eprintln!(
+                "[nnue-format] warning: the arch_str of this file does not describe the requested \
+                 network ({difference}). The file is loaded because its version, network hash, \
+                 FT hash, FC hash and body length all match the requested network; those, not the \
+                 text, identify the network."
+            );
+        }
 
         Ok(Self {
             id: expected,
@@ -912,7 +1057,7 @@ mod tests {
                 SimpleWeights::load(&mut std::io::Cursor::new(&buf), id).expect("load zeroed");
 
             assert_eq!(loaded.id, id);
-            assert_eq!(loaded.fv_scale, 13);
+            assert_eq!(loaded.fv_scale, Some(13));
             assert_eq!(loaded.ft_w.len(), id.ft_in() * id.ft_out);
             assert_eq!(loaded.l1_w.len(), id.l1_out * id.combined_dim());
             assert_eq!(loaded.l2_w.len(), id.l2_out * id.l1_out);
@@ -997,7 +1142,7 @@ mod tests {
 
     #[test]
     fn load_rejects_activation_mismatch() {
-        // feature set / 層次元が同一でも活性化が異なれば reject (arch identity)。
+        // feature set / 層次元が同一でも活性化が異なれば reject (arch 文字列が示す活性化)。
         let crelu = test_id(SimpleActivation::CReLU);
         let screlu = test_id(SimpleActivation::SCReLU);
         let mut buf = Vec::new();
@@ -1140,6 +1285,300 @@ mod tests {
             let opens = s.matches('(').count();
             let closes = s.matches(')').count();
             assert_eq!(opens, closes, "arch_str parentheses unbalanced: `{s}`");
+        }
+    }
+
+    // ---- 他の trainer が書いたファイルの受け入れ / 拒否 ----
+
+    fn kp_id(
+        activation: SimpleActivation,
+        ft_out: usize,
+        l1_out: usize,
+        l2_out: usize,
+    ) -> SimpleId {
+        SimpleId {
+            feature_set: FeatureSet::Kp.spec(),
+            activation,
+            ft_out,
+            l1_out,
+            l2_out,
+        }
+    }
+
+    /// `id` の零重みネットを `fv_scale` 付きで書き出した bytes。
+    fn saved(id: SimpleId, fv_scale: i32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        SimpleWeights::zeroed(id, fv_scale)
+            .save_quantised(&mut buf)
+            .unwrap();
+        buf
+    }
+
+    /// arch 文字列だけを `new_arch` に差し替えた bytes。長さ欄も合わせて書き換える。
+    fn with_arch_str(bytes: &[u8], new_arch: &str) -> Vec<u8> {
+        let old_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let mut out = bytes[..8].to_vec();
+        out.extend_from_slice(&(new_arch.len() as u32).to_le_bytes());
+        out.extend_from_slice(new_arch.as_bytes());
+        out.extend_from_slice(&bytes[12 + old_len..]);
+        out
+    }
+
+    fn arch_str_of(bytes: &[u8]) -> String {
+        let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        String::from_utf8(bytes[12..12 + len].to_vec()).unwrap()
+    }
+
+    fn load_bytes(bytes: &[u8], expected: SimpleId) -> io::Result<SimpleWeights> {
+        SimpleWeights::load(&mut std::io::Cursor::new(bytes), expected)
+    }
+
+    /// `arch_str` を持つ file を `expected` で読み、受け入れて警告も無いことを確かめる。
+    fn assert_accepted_silently(bytes: &[u8], expected: SimpleId) -> SimpleWeights {
+        let arch_str = arch_str_of(bytes);
+        let report = inspect_arch_text(&arch_str, &expected).unwrap();
+        assert_eq!(report.difference, None, "arch_str: {arch_str}");
+        load_bytes(bytes, expected).unwrap_or_else(|e| panic!("`{arch_str}` must load: {e}"))
+    }
+
+    #[test]
+    fn load_accepts_model_type_prefix() {
+        let id = kp_id(SimpleActivation::CReLU, 256, 32, 32);
+        let canonical = build_arch_str(&id, 28);
+        let bytes = with_arch_str(&saved(id, 28), &format!("ModelType=Standard;{canonical}"));
+        let loaded = assert_accepted_silently(&bytes, id);
+        assert_eq!(loaded.fv_scale, Some(28));
+    }
+
+    #[test]
+    fn load_accepts_plain_affine_transform_for_the_sparse_input_layer() {
+        let id = test_id(SimpleActivation::CReLU);
+        let canonical = build_arch_str(&id, 28);
+        assert!(canonical.contains("AffineTransformSparseInput[32<-512]"));
+        let plain = canonical.replace("AffineTransformSparseInput[", "AffineTransform[");
+        let bytes = with_arch_str(&saved(id, 28), &plain);
+        let loaded = assert_accepted_silently(&bytes, id);
+        assert_eq!(loaded.fv_scale, Some(28));
+    }
+
+    #[test]
+    fn load_accepts_a_missing_fv_scale_and_does_not_invent_one() {
+        for act in ALL_ACTIVATIONS {
+            let id = test_id(act);
+            let bytes = with_arch_str(&saved(id, 28), &arch_identity(&id));
+            let loaded = assert_accepted_silently(&bytes, id);
+            assert_eq!(loaded.fv_scale, None, "{act:?}");
+            assert_eq!(loaded.id, id);
+        }
+    }
+
+    #[test]
+    fn load_accepts_all_tolerated_differences_together() {
+        // 配布されている 128x2-32-32 の HalfKP は `ModelType=` 付き・素の
+        // `AffineTransform`・`fv_scale` 無しで書かれている。
+        let id = SimpleId {
+            feature_set: FeatureSet::HalfKp.spec(),
+            activation: SimpleActivation::CReLU,
+            ft_out: 128,
+            l1_out: 32,
+            l2_out: 32,
+        };
+        let foreign = format!(
+            "ModelType=Standard;{}",
+            arch_identity(&id).replace("AffineTransformSparseInput[", "AffineTransform[")
+        );
+        assert!(foreign.starts_with("ModelType=Standard;Features=HalfKP(Friend)[125388->128x2]"));
+        let bytes = with_arch_str(&saved(id, 28), &foreign);
+        let loaded = assert_accepted_silently(&bytes, id);
+        assert_eq!(loaded.fv_scale, None);
+    }
+
+    #[test]
+    fn load_accepts_a_misdescribed_arch_str_and_reports_the_difference() {
+        // 768x2-16-64 の本体に 256x2-32-32 の文字列が付いたファイル。hash と本体の長さは
+        // 768x2-16-64 のものなので読み込めるが、文字列の違いは報告される。
+        let id = kp_id(SimpleActivation::CReLU, 768, 16, 64);
+        let wrong_text = arch_identity(&kp_id(SimpleActivation::CReLU, 256, 32, 32));
+        let bytes = with_arch_str(&saved(id, 28), &wrong_text);
+
+        let report = inspect_arch_text(&arch_str_of(&bytes), &id).unwrap();
+        let difference = report.difference.expect("a dimension misprint is reported");
+        assert!(
+            difference.contains("[1710->256x2]") && difference.contains("[1710->768x2]"),
+            "the report must show both dimension texts: {difference}"
+        );
+        assert_eq!(report.fv_scale, None);
+
+        let loaded = load_bytes(&bytes, id).expect("hashes and length match, so it loads");
+        assert_eq!(loaded.id, id);
+        assert_eq!(loaded.fv_scale, None);
+        assert_eq!(loaded.ft_w.len(), 1710 * 768);
+    }
+
+    #[test]
+    fn tolerated_differences_do_not_hide_other_differences() {
+        // 許容する 3 種の違いに加えて次元の誤記があれば、差異は報告される。
+        let id = kp_id(SimpleActivation::CReLU, 768, 16, 64);
+        let wrong = arch_identity(&kp_id(SimpleActivation::CReLU, 256, 32, 32))
+            .replace("AffineTransformSparseInput[", "AffineTransform[");
+        let report = inspect_arch_text(&format!("ModelType=Standard;{wrong}"), &id).unwrap();
+        assert!(report.difference.is_some());
+    }
+
+    #[test]
+    fn load_rejects_a_wrong_version() {
+        let id = test_id(SimpleActivation::CReLU);
+        let mut bytes = saved(id, 28);
+        bytes[..4].copy_from_slice(&(NNUE_VERSION ^ 1).to_le_bytes());
+        let err = load_bytes(&bytes, id).expect_err("wrong version must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("version"), "{err}");
+    }
+
+    #[test]
+    fn load_rejects_each_wrong_hash() {
+        let id = kp_id(SimpleActivation::CReLU, 256, 32, 32);
+        let good = saved(id, 28);
+        let arch_len = u32::from_le_bytes(good[8..12].try_into().unwrap()) as usize;
+        let ft_hash_at = 12 + arch_len;
+        let fc_hash_at = ft_hash_at + 4 + 2 * (id.ft_out + id.ft_in() * id.ft_out);
+        for (name, at) in [
+            ("network_hash", 4),
+            ("ft_hash", ft_hash_at),
+            ("fc_hash", fc_hash_at),
+        ] {
+            let mut bytes = good.clone();
+            bytes[at] ^= 0x01;
+            let err = load_bytes(&bytes, id).expect_err("a wrong hash must reject");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{name}");
+            assert!(err.to_string().contains(name), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn load_rejects_wrong_body_length() {
+        let id = kp_id(SimpleActivation::CReLU, 256, 32, 32);
+        let good = saved(id, 28);
+        assert_eq!(good.len() - (12 + arch_str_of(&good).len()), body_len(&id));
+        assert!(load_bytes(&good, id).is_ok());
+
+        // 1 バイト足りない、または 1 バイト余るファイル。
+        let short = &good[..good.len() - 1];
+        let err = load_bytes(short, id).expect_err("a short body must reject");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+
+        let mut long = good.clone();
+        long.push(0);
+        let err = load_bytes(&long, id).expect_err("trailing bytes must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("trailing bytes"), "{err}");
+    }
+
+    #[test]
+    fn load_rejects_wrong_body_length_even_with_tolerated_text() {
+        let id = test_id(SimpleActivation::CReLU);
+        let mut bytes = with_arch_str(&saved(id, 28), &arch_identity(&id));
+        bytes.extend_from_slice(&[0; 32]);
+        assert!(load_bytes(&bytes, id).is_err());
+    }
+
+    #[test]
+    fn load_rejects_an_activation_the_text_contradicts() {
+        for (written, wanted) in [
+            (SimpleActivation::SCReLU, SimpleActivation::CReLU),
+            (SimpleActivation::CReLU, SimpleActivation::SCReLU),
+        ] {
+            let bytes = saved(test_id(written), 28);
+            let err = load_bytes(&bytes, test_id(wanted)).expect_err("activation must reject");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+            assert!(err.to_string().contains("activation mismatch"), "{err}");
+
+            // fv_scale が無くても、許容する違いがあっても結果は変わらない。
+            let bare = with_arch_str(
+                &bytes,
+                &format!("ModelType=Standard;{}", arch_identity(&test_id(written))),
+            );
+            assert!(load_bytes(&bare, test_id(wanted)).is_err());
+        }
+    }
+
+    #[test]
+    fn load_rejects_an_arch_str_naming_both_squared_relu_and_pairwise() {
+        let id = test_id(SimpleActivation::Pairwise);
+        let both = format!("{},SqrClippedReLU[32]", arch_identity(&id));
+        let bytes = with_arch_str(&saved(id, 28), &both);
+        let err = load_bytes(&bytes, id).expect_err("an ambiguous activation must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn load_rejects_a_pairwise_net_read_as_crelu_and_the_reverse() {
+        // Pairwise は L1 入力次元が半減するので hash が変わる。文字列を書き換えても通らない。
+        let pairwise = test_id(SimpleActivation::Pairwise);
+        let crelu = test_id(SimpleActivation::CReLU);
+        let bytes = saved(pairwise, 28);
+        let relabelled = with_arch_str(&bytes, &build_arch_str(&crelu, 28));
+        assert!(load_bytes(&relabelled, crelu).is_err());
+        assert!(load_bytes(&saved(crelu, 28), pairwise).is_err());
+    }
+
+    #[test]
+    fn load_rejects_a_different_feature_set_or_dimension_whatever_the_text_says() {
+        let kp = kp_id(SimpleActivation::CReLU, 256, 32, 32);
+        let halfkp = SimpleId {
+            feature_set: FeatureSet::HalfKp.spec(),
+            ..kp
+        };
+        let kp_bytes = saved(kp, 28);
+        assert!(load_bytes(&kp_bytes, halfkp).is_err());
+        // 文字列を期待する形に書き換えても hash が違うので落ちる。
+        let relabelled = with_arch_str(&kp_bytes, &build_arch_str(&halfkp, 28));
+        let err = load_bytes(&relabelled, halfkp).expect_err("feature set must reject");
+        assert!(err.to_string().contains("network_hash"), "{err}");
+
+        for narrower in [
+            SimpleId { ft_out: 128, ..kp },
+            SimpleId { l1_out: 16, ..kp },
+            SimpleId { l2_out: 64, ..kp },
+        ] {
+            let relabelled = with_arch_str(&kp_bytes, &build_arch_str(&narrower, 28));
+            assert!(load_bytes(&relabelled, narrower).is_err(), "{narrower:?}");
+        }
+    }
+
+    #[test]
+    fn load_rejects_a_malformed_fv_scale_even_if_everything_else_matches() {
+        let id = test_id(SimpleActivation::CReLU);
+        for suffix in [",fv_scale=abc", ",fv_scale=", ",fv_scale=0", ",fv_scale=-3"] {
+            let bytes = with_arch_str(&saved(id, 28), &format!("{}{suffix}", arch_identity(&id)));
+            let err = load_bytes(&bytes, id).expect_err(suffix);
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{suffix}");
+        }
+    }
+
+    #[test]
+    fn saving_a_net_without_fv_scale_writes_no_token_and_reloads_identically() {
+        let id = test_id(SimpleActivation::SCReLU);
+        let mut weights = SimpleWeights::zeroed(id, 28);
+        weights.fv_scale = None;
+        let mut bytes = Vec::new();
+        weights.save_quantised(&mut bytes).unwrap();
+        assert!(!arch_str_of(&bytes).contains("fv_scale"));
+
+        let loaded = assert_accepted_silently(&bytes, id);
+        assert_eq!(loaded.fv_scale, None);
+        let mut again = Vec::new();
+        loaded.save_quantised(&mut again).unwrap();
+        assert_eq!(again, bytes);
+    }
+
+    #[test]
+    fn a_file_with_fv_scale_loads_exactly_as_before() {
+        for act in ALL_ACTIVATIONS {
+            let id = test_id(act);
+            let bytes = saved(id, 41);
+            let loaded = assert_accepted_silently(&bytes, id);
+            assert_eq!(loaded.fv_scale, Some(41), "{act:?}");
         }
     }
 

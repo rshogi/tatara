@@ -1362,7 +1362,8 @@ pub(crate) enum EffectBucketFactorizeShare {
 pub(crate) struct SimpleArgs {
     /// Evaluation scale written to the Simple architecture string. When
     /// omitted, it is derived from `--scale`, except that `--init-from` retains
-    /// the input net's value and v9+ raw checkpoints retain their saved value.
+    /// the input net's value (when it has one) and v9+ raw checkpoints retain
+    /// their saved value.
     /// When resuming a v8 or earlier checkpoint, repeat this option to preserve
     /// an override; otherwise the value is derived from `--scale`.
     #[arg(long, allow_hyphen_values = true, value_parser = parse_positive_i32)]

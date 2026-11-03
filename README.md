@@ -36,11 +36,23 @@ default and around **+55%** with `--all-optim` (FP16/TF32).
 **Throughput** (`--batch-size 65536`, pos/s; fp32 → `--all-optim` (fp16/tf32)). The
 `--all-optim` gain is larger on older, more bandwidth-bound GPUs and on bigger nets:
 
-| arch / config (feature) | RTX 5090 | RTX 3080 Ti |
-|---|---|---|
-| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 2.45M → 3.13M (+28%) | 0.99M → 1.59M (+61%) |
-| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 4.24M → 5.10M (+20%) | 2.05M → 2.97M (+45%) |
-| Simple `256x2-32-32` (`halfkp`) | 11.29M → 13.37M (+18%) | 7.30M → 10.10M (+38%) |
+| arch / config (feature) | RTX 5090 | RTX 3080 Ti | RTX 4070 Ti |
+|---|---|---|---|
+| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 2.45M → 3.13M (+28%) | 0.99M → 1.59M (+61%) | 1.26M → 2.14M (+70%) |
+| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 4.24M → 5.10M (+20%) | 2.05M → 2.97M (+45%) | 2.69M → 4.14M (+54%) |
+| Simple `256x2-32-32` (`halfkp`) | 11.29M → 13.37M (+18%) | 7.30M → 10.10M (+38%) | 5.79M → 7.85M (+35%) |
+| Simple `256x2-32-32` (`kp`) | – | – | 6.69M → 6.15M (−8%) |
+
+The RTX 4070 Ti (12 GB) column is the mean of two runs of the command below with the
+teacher file in the page cache and `--superbatches 3` (`--batches-per-superbatch 60` for
+LayerStack, 150 for Simple); the two runs differ by at most 0.2%. For `kp`, whose
+feature transformer has only 1,710 rows, `--all-optim` was slower than fp32. `–` means not
+measured.
+
+Each position is 40 bytes in the teacher file, so training at 6M positions/s reads about
+240 MB/s, and storage that reads more slowly sets a lower limit: 100 MB/s allows about
+2.5M positions/s. A hard disk may not keep up; an SSD, fast network storage, or a teacher
+file that fits in the page cache does.
 
 Measurement command (teacher-data / progress paths are environment-specific;
 compare pos/s with and without `--all-optim`):
@@ -48,9 +60,9 @@ compare pos/s with and without `--all-optim`):
 ```sh
 # LayerStack (halfka-hm-merged, needs progress)
 cargo run --release --bin nnue-train -- \
-  --data /path/to/teacher.psv --progress-coeff /path/to/progress.bin \
+  --data /path/to/teacher.psv \
   --feature-set halfka-hm-merged --batch-size 65536 --superbatches 8 [--all-optim] \
-  layerstack --ft-out {1536|768} --l1 {16|8} --l2 32
+  layerstack --progress-coeff /path/to/progress.bin --ft-out {1536|768} --l1 {16|8} --l2 32
 
 # HalfKP (simple, no progress needed; the simple trainer requires --win-rate-model)
 cargo run --release --bin nnue-train -- \
@@ -69,7 +81,7 @@ sigmoid, so this configuration uses the same value for `--scale`, every
 `--wrm-*-scaling`, and `--wrm-nnue2score`. When `simple --fv-scale` is omitted,
 `--scale` must equal `--wrm-nnue2score` whether or not weights are loaded. The
 exported `fv_scale` comes from a v9+ `--resume` checkpoint when available, then
-from the `--init-from` input net, and otherwise from
+from the `--init-from` input net if it carries one, and otherwise from
 `round(127 × QB / --scale)`. Set `simple --fv-scale <N>` to always write `N` and
 waive that equality requirement. A v9+ checkpoint preserves the value without
 respecifying it; when resuming a v8 or earlier checkpoint, repeat an override or
@@ -124,6 +136,54 @@ produces `progress.bin`, the bucket coefficients for LayerStack. The approach of
 learning game progress and assigning it to output buckets is based on an idea
 from [a post by nodchip](https://nodchip.hatenablog.com/entry/2026/02/04/000000).
 
+### Networks YaneuraOu loads
+
+A `--feature-set` alone does not name a network: the width of the feature
+transformer and the two hidden layers are part of it, and a YaneuraOu build is
+compiled for exactly one such network. These four `simple` networks are
+written in the file layout of the YaneuraOu evaluation file of the same name,
+so a build of the listed edition loads the `.bin` without conversion. All four
+use the default `--activation crelu`.
+
+| Network | `--feature-set` | `simple --arch` | YaneuraOu `YANEURAOU_EDITION` |
+|---|---|---|---|
+| `halfkp_128x2_32_32` | `halfkp` | `128x2-32-32` | `YANEURAOU_ENGINE_NNUE_halfkp_128x2_32_32` |
+| `halfkp_256x2_32_32` | `halfkp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE` |
+| `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
+| `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
+
+The names follow the network naming of the
+[shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) fork
+(`NNUE_<feature>_<FT>x2_<H1>_<H2>`, described in its
+`source/eval/nnue/architectures/README.md`), whose Makefile generates the
+architecture header from the edition name. An engine built for one network
+refuses a `.bin` of another with `NNUE hash mismatch` and `failed to read nn.bin`.
+
+`--init-from` also reads `.bin` files that other trainers wrote for one of
+these networks. A file is accepted when all of these hold:
+
+- its version word, network hash, FT hash and FC hash equal the ones computed
+  for the `--feature-set`, `simple --arch` and `--activation` you pass;
+- the data after the architecture string is exactly the length that network
+  needs, with nothing missing and nothing left over;
+- the architecture string does not name a different activation. The hashes do
+  not encode it, so a string with `SqrClippedReLU` is refused unless
+  `--activation screlu`, and one with a `/2x2]-Pairwise` feature block unless
+  `--activation pairwise`.
+
+The architecture string is otherwise not what identifies the network. It may
+differ from tatara's in a `ModelType=` prefix, in `AffineTransform` where tatara
+writes `AffineTransformSparseInput`, and in lacking `,fv_scale=`; these are
+accepted silently. Any other difference, such as a string that gives the wrong
+layer widths, is accepted with a warning on stderr that shows the two texts.
+A file with a different feature set or layer widths has different hashes and is
+refused.
+
+A file without `,fv_scale=` does not supply an `fv_scale`: the export then uses
+the same value as a run without `--init-from`, `round(127 × QB / --scale)`
+unless `simple --fv-scale` is given, and the startup log line `fv_scale:` says
+so.
+
 ## Setup
 
 ### Requirements
@@ -144,9 +204,61 @@ instructions, and the supported-GPU matrix, see [docs/setup.md](docs/setup.md).
 
 For building the kernels and running the smoke test, see
 [docs/setup.md](docs/setup.md); for how to run training, see
-[docs/training-quickstart.md](docs/training-quickstart.md). To run the trainer in a
-container instead of building it, see "Docker image" in
-[docs/setup.md](docs/setup.md#docker-image).
+[docs/training-quickstart.md](docs/training-quickstart.md). To skip the build and
+train in a container, see "Train with Docker" below.
+
+### Train with Docker
+
+The image on GitHub Container Registry holds `nnue-train` and the other tools of this
+workspace, so a machine with an NVIDIA driver that supports CUDA 12.9 and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+can train without a toolchain.
+
+```bash
+docker pull ghcr.io/rshogi/tatara:latest
+
+# GPU smoke test, no data needed; ends with "[smoke/simple] PASSED"
+docker run --rm --gpus all ghcr.io/rshogi/tatara:latest simple
+```
+
+Everything after the image name goes to `nnue-train`. Mount the teacher data
+read-only and an output directory that outlives the container, and give both
+by their paths inside the container. `--data` takes one PSV file, so concatenate
+shards first (`cat shard-*.psv > train.psv`). This trains the `kp_256x2_32_32`
+network; for another one, change `--feature-set` and `--arch` as in
+"Networks YaneuraOu loads" above:
+
+```bash
+docker run --rm --gpus all --user "$(id -u):$(id -g)" \
+  -v /path/to/data:/data:ro -v /path/to/out:/out \
+  ghcr.io/rshogi/tatara:latest \
+  --data /data/train.psv --test-data /data/val.psv \
+  --output /out --net-id kp256 \
+  --feature-set kp --superbatches <N> --batch-size 65536 --threads <N> \
+  --scale 290 --win-rate-model \
+  --wrm-in-offset 0 --wrm-target-offset 0 \
+  --wrm-in-scaling 290 --wrm-target-scaling 290 --wrm-nnue2score 290 \
+  simple --arch 256x2-32-32
+```
+
+- `--test-data` is the held-out file whose loss is printed after every superbatch.
+  Leave it out to train without validation.
+- `--threads` is the number of data-loading threads. Always set it: the data loader is
+  usually the bottleneck, and the number of physical cores is a good starting point.
+- A superbatch is `--batches-per-superbatch` batches (default 6104), about 400 million
+  positions at `--batch-size 65536`.
+- Every `--save-rate` superbatches (default 20) and at the end, the output directory
+  gets `<net-id>-<superbatch>.bin` (the quantised net) and `<net-id>-<superbatch>.ckpt`
+  (resume state).
+- The startup log prints `fv_scale: 28` for `--scale 290`. YaneuraOu does not read
+  `fv_scale` from the file; give the same number to the engine as the USI option
+  `FV_SCALE`.
+- The other tools are in the same image: `docker run --rm --entrypoint net_to_yo
+  ghcr.io/rshogi/tatara:latest --help`.
+
+Choosing GPUs, other GPU generations, and building the image yourself are covered under
+"Docker image" in [docs/setup.md](docs/setup.md#docker-image); the training options are in
+[docs/training-quickstart.md](docs/training-quickstart.md).
 
 ## Documentation
 
@@ -184,6 +296,9 @@ engines such as YaneuraOu cannot necessarily load it as-is; depending on the
 architecture, some nets need additional inference code before they can be
 loaded. A supported LayerStack net can be converted to and from the YaneuraOu
 format with [`net_to_yo` / `net_from_yo`](docs/net-to-yaneuraou.md).
+The `simple` networks listed under "Networks YaneuraOu loads" are loaded by a
+YaneuraOu build of the matching edition without conversion. YaneuraOu takes the
+output scale from its `FV_SCALE` option, not from the file.
 Pre-trained reference nets are attached to the
 [GitHub Releases](https://github.com/SH11235/tatara/releases). To train your
 own net, see the [setup guide](docs/setup.md).
@@ -209,7 +324,7 @@ own net, see the [setup guide](docs/setup.md).
 | **CReLU / SCReLU / Pairwise** | NNUE activation functions. CReLU = Clipped ReLU, SCReLU = Squared Clipped ReLU, Pairwise = elementwise product of the first and second halves, halving the input dimension. Selected by `--activation` on the `simple` architecture |
 | **RAdam / Ranger** | Rectified Adam / Ranger optimizer (Ranger = RAdam + lookahead) |
 | **WRM** | Win-rate model loss (from bullet `--win-rate-model`) |
-| **QA / QB / FV_SCALE** | Quantisation scale constants. QA = the FT weight / bias quantisation multiplier (on the `simple` architecture it is set by the activation: 127 for CReLU / Pairwise, 255 for SCReLU); QB = dense-weight scale (64). FV_SCALE converts the net output back to a centipawn evaluation. On `simple`, activation outputs are always on a 127 scale, so the default is `round(127 × QB / training scale)`; `--fv-scale` overrides it, while omission retains the value from a v9+ resume checkpoint, then from an `--init-from` input net |
+| **QA / QB / FV_SCALE** | Quantisation scale constants. QA = the FT weight / bias quantisation multiplier (on the `simple` architecture it is set by the activation: 127 for CReLU / Pairwise, 255 for SCReLU); QB = dense-weight scale (64). FV_SCALE converts the net output back to a centipawn evaluation. On `simple`, activation outputs are always on a 127 scale, so the default is `round(127 × QB / training scale)`; `--fv-scale` overrides it, while omission retains the value from a v9+ resume checkpoint, then from an `--init-from` input net that carries one |
 | **WDL** | Win/Draw/Loss — the game-result target (1.0 / 0.5 / 0.0) blended against the teacher score by the WDL lambda; see [docs/training-schedule.md](docs/training-schedule.md) |
 | **FNV-1a** | Fowler–Noll–Vo hash, variant 1a — a simple non-cryptographic hash. The trainer uses its 64-bit form for the recipe fingerprint stored in resume checkpoints |
 | **CV** | Coefficient of variation — sample standard deviation divided by the mean, reported as a percentage for benchmark run-to-run variability |
