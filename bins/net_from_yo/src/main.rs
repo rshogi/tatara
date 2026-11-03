@@ -102,7 +102,8 @@ struct DetectedArch {
         .args([
             "assume_kingrank9",
             "assume_progresskpabs",
-            "assume_progresskpabsq16ek"
+            "assume_progresskpabsq16ek",
+            "assume_progresskpabsq16pad"
         ])
 ))]
 struct Args {
@@ -128,6 +129,12 @@ struct Args {
     /// entering-king bucket 8. Requires a 9-stack `..._K3K3` network.
     #[arg(long)]
     assume_progresskpabsq16ek: bool,
+    /// Assert that the net uses the routing of `--bucket-mode progresskpabsq16pad`
+    /// (YaneuraOu default `LS_BUCKET_MODE progress8kpabs`): progress buckets 0-7 from the
+    /// 8-way split and a ninth stack that is never selected. Requires a 9-stack `..._K3K3`
+    /// network.
+    #[arg(long)]
+    assume_progresskpabsq16pad: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -139,6 +146,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.assume_kingrank9,
         args.assume_progresskpabs,
         args.assume_progresskpabsq16ek,
+        args.assume_progresskpabsq16pad,
     )?;
 
     let input = File::open(&args.input)?;
@@ -157,19 +165,22 @@ fn routing_from_assertions(
     assume_kingrank9: bool,
     assume_progresskpabs: bool,
     assume_progresskpabsq16ek: bool,
+    assume_progresskpabsq16pad: bool,
 ) -> io::Result<YaneuraOuRouting> {
     match (
         assume_kingrank9,
         assume_progresskpabs,
         assume_progresskpabsq16ek,
+        assume_progresskpabsq16pad,
     ) {
-        (true, false, false) => Ok(YaneuraOuRouting::KingRank9),
-        (false, true, false) => Ok(YaneuraOuRouting::ProgressKpAbs),
-        (false, false, true) => Ok(YaneuraOuRouting::ProgressKpAbsQ16EnteringKing),
+        (true, false, false, false) => Ok(YaneuraOuRouting::KingRank9),
+        (false, true, false, false) => Ok(YaneuraOuRouting::ProgressKpAbs),
+        (false, false, true, false) => Ok(YaneuraOuRouting::ProgressKpAbsQ16EnteringKing),
+        (false, false, false, true) => Ok(YaneuraOuRouting::ProgressKpAbsQ16Padded),
         _ => invalid_input(
             "YaneuraOu SFNN files do not fully identify the bucket routing rule; pass exactly \
-             one of --assume-kingrank9, --assume-progresskpabs or --assume-progresskpabsq16ek \
-             after confirming how the net selects its LayerStack",
+             one of --assume-kingrank9, --assume-progresskpabs, --assume-progresskpabsq16ek or \
+             --assume-progresskpabsq16pad after confirming how the net selects its LayerStack",
         ),
     }
 }
@@ -182,6 +193,11 @@ fn check_routing(layout: LayerStackLayout, routing: YaneuraOuRouting) -> io::Res
         (YaneuraOuRouting::KingRank9, LayerStackLayout::King3x3) => Ok(()),
         (YaneuraOuRouting::KingRank9, _) => invalid_data(format!(
             "--assume-kingrank9 requires a K3K3 network with {KINGRANK9_BUCKETS} LayerStacks, but the file has {} LayerStack(s) without a K3K3 token",
+            layout.stack_count()
+        )),
+        (YaneuraOuRouting::ProgressKpAbsQ16Padded, LayerStackLayout::King3x3) => Ok(()),
+        (YaneuraOuRouting::ProgressKpAbsQ16Padded, _) => invalid_data(format!(
+            "--assume-progresskpabsq16pad requires a K3K3 network with {KINGRANK9_BUCKETS} LayerStacks, but the file has {} LayerStack(s) without a K3K3 token",
             layout.stack_count()
         )),
         (YaneuraOuRouting::ProgressKpAbsQ16EnteringKing, LayerStackLayout::King3x3) => Ok(()),
@@ -956,30 +972,30 @@ mod tests {
 
     #[test]
     fn routing_requires_exactly_one_explicit_assertion() {
-        for (kingrank9, progress, entering_king) in [
-            (false, false, false),
-            (true, true, false),
-            (true, false, true),
-            (false, true, true),
-            (true, true, true),
-        ] {
-            let error = routing_from_assertions(kingrank9, progress, entering_king).unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-            assert!(error.to_string().contains("--assume-kingrank9"));
-            assert!(error.to_string().contains("--assume-progresskpabsq16ek"));
+        let expected = [
+            YaneuraOuRouting::KingRank9,
+            YaneuraOuRouting::ProgressKpAbs,
+            YaneuraOuRouting::ProgressKpAbsQ16EnteringKing,
+            YaneuraOuRouting::ProgressKpAbsQ16Padded,
+        ];
+        for mask in 0..16_u32 {
+            let flag = |bit: u32| mask & (1 << bit) != 0;
+            let result = routing_from_assertions(flag(0), flag(1), flag(2), flag(3));
+            if mask.count_ones() == 1 {
+                assert_eq!(result.unwrap(), expected[mask.trailing_zeros() as usize]);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+                for name in [
+                    "--assume-kingrank9",
+                    "--assume-progresskpabs",
+                    "--assume-progresskpabsq16ek",
+                    "--assume-progresskpabsq16pad",
+                ] {
+                    assert!(error.to_string().contains(name), "{name}: {error}");
+                }
+            }
         }
-        assert_eq!(
-            routing_from_assertions(true, false, false).unwrap(),
-            YaneuraOuRouting::KingRank9
-        );
-        assert_eq!(
-            routing_from_assertions(false, true, false).unwrap(),
-            YaneuraOuRouting::ProgressKpAbs
-        );
-        assert_eq!(
-            routing_from_assertions(false, false, true).unwrap(),
-            YaneuraOuRouting::ProgressKpAbsQ16EnteringKing
-        );
     }
 
     const PROGRESS8_ARCH: &str = "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->2304x2],Network=SFNN_HALFKAHM2_2304_15_64_PROGRESS8{LayerStack=8}";
@@ -1086,7 +1102,9 @@ mod tests {
     #[test]
     fn routing_assertion_must_match_layer_stack_layout() {
         use LayerStackLayout::{King3x3, Progress, Single};
-        use YaneuraOuRouting::{KingRank9, ProgressKpAbs, ProgressKpAbsQ16EnteringKing};
+        use YaneuraOuRouting::{
+            KingRank9, ProgressKpAbs, ProgressKpAbsQ16EnteringKing, ProgressKpAbsQ16Padded,
+        };
         check_routing(King3x3, KingRank9).unwrap();
         for layout in [Progress(8), Single] {
             assert!(
@@ -1110,12 +1128,45 @@ mod tests {
                     .contains("K3K3")
             );
         }
+        // 進行度 8 等分の routing も 9 枠の K3K3 だけを受け付ける。
+        check_routing(King3x3, ProgressKpAbsQ16Padded).unwrap();
+        for layout in [Progress(8), Progress(9), Single] {
+            assert!(
+                check_routing(layout, ProgressKpAbsQ16Padded)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("K3K3")
+            );
+        }
         assert!(
             check_routing(Progress(16), ProgressKpAbs)
                 .unwrap_err()
                 .to_string()
                 .contains("up to")
         );
+    }
+
+    #[test]
+    fn read_yo_round_trips_padded_progress_routing() {
+        let (fs, ft_out, l1_out, l2_out) = (FeatureSet::HalfKaHmMerged, 32, 4, 8);
+        let mut w = LayerStackWeights::zeroed(fs.spec(), ft_out, l1_out, l2_out, KINGRANK9_BUCKETS);
+        for (i, v) in w.l1_w.iter_mut().enumerate() {
+            *v = ((i % 9) as i8 - 4) as f32 / QB as f32;
+        }
+        for (i, v) in w.l3_b.iter_mut().enumerate() {
+            *v = (i as i32 - 3) as f32 / (QA * QB) as f32;
+        }
+        let mut bytes = Vec::new();
+        nnue_format::save_yaneuraou_with_routing(
+            &mut bytes,
+            &w,
+            YaneuraOuRouting::ProgressKpAbsQ16Padded,
+        )
+        .unwrap();
+        let mut reader = Cursor::new(bytes);
+        let parsed = read_yo(&mut reader, YaneuraOuRouting::ProgressKpAbsQ16Padded).unwrap();
+        reject_trailing_data(&mut reader).unwrap();
+        assert_same_weights(&parsed, &w);
     }
 
     #[test]

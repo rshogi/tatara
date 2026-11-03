@@ -19,7 +19,7 @@
 | ファイル | 形式 | 用途 | サイズ目安 |
 |---|---|---|---:|
 | 教師データ PSV | `PackedSfenValue` × N (40 bytes 固定 / 局面) | `--data` で渡す | 数百 GB |
-| progress 係数 | `progress.bin` (f64 LE、玉 81 マス × KP-abs 駒入力 1548 = `1_003_104` bytes 固定) | LayerStack の `progresskpabs` / `progresskpabsq16` / `progresskpabsq16ek` mode で `--progress-coeff` に渡す。`kingrank9` と simple では不要 | 1.0 MB |
+| progress 係数 | `progress.bin` (f64 LE、玉 81 マス × KP-abs 駒入力 1548 = `1_003_104` bytes 固定) | LayerStack の `progresskpabs` / `progresskpabsq16` / `progresskpabsq16ek` / `progresskpabsq16pad` mode で `--progress-coeff` に渡す。`kingrank9` と simple では不要 | 1.0 MB |
 | (任意) pretrained NNUE | 量子化 `.bin` (`save_quantised` 形式) | `--init-from` で weight 注入 (optimizer は reset) | — |
 
 ## 例 1: HalfKP NNUE を学習 (simple アーキ)
@@ -57,7 +57,7 @@ reject される。上記の `--wrm-*` 値は WRM を plain sigmoid へ恒等退
 
 ## 例 2: LayerStack NNUE を学習
 
-`layerstack` アーキには 4 つの bucket mode がある。既定の `progresskpabs` は
+`layerstack` アーキには 5 つの bucket mode がある。既定の `progresskpabs` は
 局面進行度を 2–9 bucket に分けるため、`progress-kpabs-train` で `progress.bin` を
 学習し、`progress-bucket-survey` で分布を確認する。手順は
 [局面進行度 bucket: `progress.bin` の用意](progress-bin.ja.md) を参照。
@@ -71,6 +71,14 @@ reject される。上記の `--wrm-*` 値は WRM を plain sigmoid へ恒等退
 bucket 0〜7 に入る。`progresskpabsq16` と同じ `progress.bin` を使う。bucket の規則は、YaneuraOu の
 `..._progress8ek` ネットワークが `LS_BUCKET_MODE progress8ek` で使うものと同じ。エンジン側の扱いは
 [YaneuraOu への変換](net-to-yaneuraou.md) を参照。
+`progresskpabsq16pad` は Q16 の進行度を 8 等分する。`progresskpabsq16` に `--num-buckets 8` を
+指定したときと同じ bucket だが、stack 数は 9 のままで、玉の位置は見ない。stack 8 には局面が一つも
+送られないので、その重みは学習されない。`progresskpabsq16` と同じ `progress.bin` を使う。bucket の規則は、
+YaneuraOu の `..._progress8kpabs` ネットワークが既定の `LS_BUCKET_MODE progress8kpabs` で使うものと
+同じ。optimizer の weight decay と norm loss は全 stack に掛かるので、`--weight-decay` や `--norm-loss`
+を使うと stack 8 の重みも動く。エンジンは stack 8 を読まない。stack 8 の重みは、ほかの stack の学習には
+影響しない。例外は `--norm-loss` で、bias は tensor 全体で 1 つの L2 norm を取って補正するため、
+stack 8 の bias の値がほかの stack の bias の補正量に入る。
 `kingrank9` は YaneuraOu KingRank9 と同じく、双方の玉段を手番側視点へ正規化して
 3x3 の固定 9 bucket に分ける。この mode では `progress.bin` は使わない。
 
@@ -97,6 +105,8 @@ KingRank9 を使う場合は末尾を次のように置き換える:
   layerstack --bucket-mode progresskpabsq16ek --progress-coeff <path/to/progress.bin>
 ```
 
+9 stack のうち 0〜7 だけを使う規則にするには、`progresskpabsq16ek` を `progresskpabsq16pad` に置き換える。
+
 `layerstack` は既定で `--feature-set halfka-hm-merged` / 9 bucket。FT 出力次元は `--ft-out`(128 の倍数、既定 1536)で変えられる。
 
 ## 主な option
@@ -121,8 +131,8 @@ KingRank9 を使う場合は末尾を次のように置き換える:
 | `--teacher-shuffle-seed` | 0 | dataset epoch・窓番号と組み合わせる窓内shuffleのbase seed (`--teacher-shuffle-buffer-mib > 0` のときだけ効果がある)。同じ値なら窓のpermutationは再現するが、`--threads >= 2`ではworkerの完了順によりbatch delivery順は完全には固定されない |
 | `--test-tail-positions` | なし | `--data` の末尾 N 局面を同一ファイル内の held-out 検証集合として確保する (下記「held-out validation」参照)。held-out validation を有効化したいときの推奨経路 |
 | `--test-positions` | 10000 | held-out source から毎 superbatch 評価する局面数。`--test-tail-positions` または `--test-data` 指定時のみ有効 |
-| `--bucket-mode` (`layerstack`) | progresskpabs | `progresskpabs` は KP-absolute 進行度で routing する。`progresskpabsq16` は同じ進行度を Q16 整数演算で routing する。`progresskpabsq16ek` は Q16 の routing に相入玉局面専用の bucket 8 を足したもの (それ以外の局面は進行度を 8 等分) で、9 bucket 固定。`kingrank9` は YaneuraOu KingRank9 と同じ固定 9 bucket で、`--progress-coeff` との併用はエラー |
-| `--num-buckets` (`layerstack`) | 9 | `progresskpabs` / `progresskpabsq16` では `[2, 9]` の整数で、各局面を `min(N-1, floor(progress * N))` へ routing する。`kingrank9` と `progresskpabsq16ek` では 9 固定 |
+| `--bucket-mode` (`layerstack`) | progresskpabs | `progresskpabs` は KP-absolute 進行度で routing する。`progresskpabsq16` は同じ進行度を Q16 整数演算で routing する。`progresskpabsq16ek` は Q16 の routing に相入玉局面専用の bucket 8 を足したもの (それ以外の局面は進行度を 8 等分) で、9 bucket 固定。`progresskpabsq16pad` は Q16 の進行度を 8 等分して bucket 0〜7 に振り分け、bucket 8 には局面を送らない (9 bucket 固定)。`kingrank9` は YaneuraOu KingRank9 と同じ固定 9 bucket で、`--progress-coeff` との併用はエラー |
+| `--num-buckets` (`layerstack`) | 9 | `progresskpabs` / `progresskpabsq16` では `[2, 9]` の整数で、各局面を `min(N-1, floor(progress * N))` へ routing する。`kingrank9`、`progresskpabsq16ek`、`progresskpabsq16pad` では 9 固定 |
 
 ### 教師データの先読みとshuffle
 

@@ -17,7 +17,8 @@ use crate::{
     arch::{SMOKE_BATCH, SMOKE_LOSS_WRM},
     trainer_common::{BatchData, PrecisionFlags},
     trainer_layerstack::{
-        FactorizerVirtualBlock, GpuTrainer as LayerStackGpuTrainer, OptimGroupConfig,
+        FactorizerVirtualBlock, GpuTrainer as LayerStackGpuTrainer, LayerStackRawCheckpointState,
+        OptimGroupConfig,
     },
     trainer_simple::SimpleGpuTrainer,
 };
@@ -588,6 +589,7 @@ struct LayerStackTestOptions {
     optimizer: OptimizerKind,
     norm_loss_factor: Option<f32>,
     psqt: bool,
+    weight_decay: f32,
 }
 
 impl LayerStackTestOptions {
@@ -603,6 +605,7 @@ impl LayerStackTestOptions {
             optimizer: OptimizerKind::Ranger,
             norm_loss_factor: None,
             psqt: false,
+            weight_decay: 0.0,
         }
     }
 }
@@ -643,7 +646,7 @@ fn create_layerstack_trainer_with_batch(
             options.precision,
             options.feature_set,
             options.optimizer,
-            OptimGroupConfig::resolve(0.0, None, None, None, None, None, None),
+            OptimGroupConfig::resolve(options.weight_decay, None, None, None, None, None, None),
             options.norm_loss_factor,
             psqt_init.as_deref(),
             &LayerStackInit::default_uniform(),
@@ -3895,5 +3898,535 @@ fn fused_ft_norms_follow_external_weight_writes() -> Result<(), Box<dyn std::err
     assert!(fused.ft_fused_norm_sums_to_host_for_test()?.is_none());
     step_both(&mut fused, &mut separate)?;
     assert_same_weights("after resume", &fused, &separate)?;
+    Ok(())
+}
+
+/// LayerStack の 1 stack 分の重みと optimizer 状態を、group 名ごとに切り出す。
+/// 返り値は `(group 名, [w, m, v, slow] の stack 分の slice)`。
+fn stack_slices<'a>(
+    state: &'a LayerStackRawCheckpointState,
+    options: &LayerStackTestOptions,
+    stack: usize,
+) -> Vec<(&'static str, [&'a [f32]; 4])> {
+    let l2_in = (options.l1_out - 1) * 2;
+    let per_stack = [
+        ("l1_w", options.l1_out * options.ft_out),
+        ("l1_b", options.l1_out),
+        ("l2_w", options.l2_out * l2_in),
+        ("l2_b", options.l2_out),
+        ("l3_w", options.l2_out),
+        ("l3_b", 1),
+    ];
+    per_stack
+        .into_iter()
+        .map(|(name, len)| {
+            let (_, group) = state
+                .1
+                .iter()
+                .find(|(group_name, _)| *group_name == name)
+                .unwrap_or_else(|| panic!("group {name} is missing"));
+            let range = stack * len..(stack + 1) * len;
+            (
+                name,
+                [
+                    &group.0[range.clone()],
+                    &group.1[range.clone()],
+                    &group.2[range.clone()],
+                    &group.3[range],
+                ],
+            )
+        })
+        .collect()
+}
+
+fn count_differences(a: &[f32], b: &[f32]) -> usize {
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b)
+        .filter(|(x, y)| x.to_bits() != y.to_bits())
+        .count()
+}
+
+/// 9 stack の LayerStack に、bucket 0..=7 だけへ局面を送る学習 (`progresskpabsq16pad` の
+/// 振り分け) を 12 step 回し、stack 8 の重みと optimizer 状態を初期値と bit 比較した結果。
+struct PaddedStackRun {
+    /// stack 8 の `[w, m, v, slow]` のうち、初期値と bit が異なる要素数の合計。
+    changed_weights: usize,
+    changed_slow_weights: usize,
+    nonzero_first_moments: usize,
+    nonzero_second_moments: usize,
+    /// 学習された stack (0..=7) の `l1_w` / `l2_w` / `l3_w` のうち、`w` が変わった要素数。
+    trained_stacks_changed: usize,
+}
+
+fn run_padded_stack_training(
+    context: &std::sync::Arc<CudaContext>,
+    optimizer: OptimizerKind,
+    weight_decay: f32,
+    norm_loss_factor: Option<f32>,
+    warm_start: bool,
+) -> Result<PaddedStackRun, Box<dyn std::error::Error>> {
+    let options = LayerStackTestOptions {
+        num_buckets: 9,
+        optimizer,
+        weight_decay,
+        norm_loss_factor,
+        bucket_mode: BucketMode::ProgressKpAbsQ16Padded,
+        ..LayerStackTestOptions::standard()
+    };
+    let mut trainer = create_layerstack_trainer_with_options(context, true, options)?;
+    if warm_start {
+        // `--init-from` と同じ経路: 読み込んだ重みを lookahead の slow weight にも写す。
+        let weights = trainer.to_layerstack_weights()?;
+        trainer.load_layerstack_weights(&weights)?;
+    }
+    let before = trainer.raw_checkpoint_state_to_host()?;
+    let mut batch = BatchData::smoke_dummy(SMOKE_BATCH, options.feature_set);
+    for (row, bucket) in batch.bucket_idx.iter_mut().enumerate() {
+        *bucket = (row % 8) as i32;
+    }
+    for (row, score) in batch.score.iter_mut().enumerate() {
+        *score = 50.0 * ((row % 7) as f32 - 3.0);
+    }
+    batch.wdl.fill(0.8);
+    // Ranger の lookahead は 6 step ごとに同期するので、2 回分を含める。
+    for _ in 0..12 {
+        trainer.step(&batch.as_ref(), 1.0e-3, 0.0, SMOKE_LOSS_WRM)?;
+    }
+    let after = trainer.raw_checkpoint_state_to_host()?;
+
+    let unused_before = stack_slices(&before, &options, 8);
+    let unused_after = stack_slices(&after, &options, 8);
+    let mut run = PaddedStackRun {
+        changed_weights: 0,
+        changed_slow_weights: 0,
+        nonzero_first_moments: 0,
+        nonzero_second_moments: 0,
+        trained_stacks_changed: 0,
+    };
+    for ((_, b), (_, a)) in unused_before.iter().zip(&unused_after) {
+        run.changed_weights += count_differences(b[0], a[0]);
+        run.changed_slow_weights += count_differences(b[3], a[3]);
+        run.nonzero_first_moments += a[1].iter().filter(|x| x.to_bits() != 0).count();
+        run.nonzero_second_moments += a[2].iter().filter(|x| x.to_bits() != 0).count();
+    }
+    for stack in 0..8 {
+        let trained_before = stack_slices(&before, &options, stack);
+        let trained_after = stack_slices(&after, &options, stack);
+        for ((name, b), (_, a)) in trained_before.iter().zip(&trained_after) {
+            if matches!(*name, "l1_w" | "l2_w" | "l3_w") {
+                run.trained_stacks_changed += count_differences(b[0], a[0]);
+            }
+        }
+    }
+    Ok(run)
+}
+
+/// 局面を受けない stack 8 は勾配を一切受けない。1 次・2 次 moment は、optimizer や weight
+/// decay、norm loss の設定によらず 0 のままである。
+#[test]
+fn unused_stack_never_receives_a_gradient() -> Result<(), Box<dyn std::error::Error>> {
+    let context = test_cuda_context()?;
+    for optimizer in [
+        OptimizerKind::Ranger,
+        OptimizerKind::RAdam,
+        OptimizerKind::AdamW,
+    ] {
+        for (weight_decay, norm_loss_factor) in [(0.0, None), (0.01, None), (0.0, Some(1.0e-4))] {
+            let run = run_padded_stack_training(
+                &context,
+                optimizer,
+                weight_decay,
+                norm_loss_factor,
+                true,
+            )?;
+            let setting = format!("{optimizer:?} wd={weight_decay} norm_loss={norm_loss_factor:?}");
+            assert_eq!(run.nonzero_first_moments, 0, "{setting}");
+            assert_eq!(run.nonzero_second_moments, 0, "{setting}");
+            // 学習される stack は動いている (勾配が流れる設定で測っている)。
+            assert!(run.trained_stacks_changed > 0, "{setting}");
+        }
+    }
+    Ok(())
+}
+
+/// weight decay と norm loss を使わず、読み込んだ重みから学習を始める (`--init-from`) 場合、
+/// stack 8 の重みと lookahead の slow weight は bit 単位で動かない。
+#[test]
+fn unused_stack_weights_stay_bit_identical_without_decay() -> Result<(), Box<dyn std::error::Error>>
+{
+    let context = test_cuda_context()?;
+    for optimizer in [
+        OptimizerKind::Ranger,
+        OptimizerKind::RAdam,
+        OptimizerKind::AdamW,
+    ] {
+        let run = run_padded_stack_training(&context, optimizer, 0.0, None, true)?;
+        assert_eq!(run.changed_weights, 0, "{optimizer:?}");
+        assert_eq!(run.changed_slow_weights, 0, "{optimizer:?}");
+        assert!(run.trained_stacks_changed > 0, "{optimizer:?}");
+    }
+    Ok(())
+}
+
+/// optimizer の weight decay と norm loss は weight group 全体に掛かるため、stack 8 の重みも
+/// 動く (勾配による学習ではない)。上の bit 不変の test が動きを検出できることの対照であり、
+/// 未使用 stack を除外する仕組みを入れたらこの test を更新する。
+#[test]
+fn weight_decay_and_norm_loss_move_the_unused_stack_weights()
+-> Result<(), Box<dyn std::error::Error>> {
+    let context = test_cuda_context()?;
+    let decayed = run_padded_stack_training(&context, OptimizerKind::AdamW, 0.01, None, true)?;
+    assert!(decayed.changed_weights > 0);
+    let norm_loss =
+        run_padded_stack_training(&context, OptimizerKind::RAdam, 0.0, Some(1.0e-4), true)?;
+    assert!(norm_loss.changed_weights > 0);
+    // 0 から学習する Ranger は、最初の lookahead 同期 (slow weight が 0) で全重みが alpha 倍になる。
+    let from_scratch =
+        run_padded_stack_training(&context, OptimizerKind::Ranger, 0.0, None, false)?;
+    assert!(from_scratch.changed_weights > 0);
+    Ok(())
+}
+
+/// stack 別の tensor のうち、どれを書き換えるか。
+#[derive(Clone, Copy)]
+enum StackTensors {
+    /// `l1_w` `l2_w` `l3_w`。
+    Weights,
+    /// `l1_b` `l2_b` `l3_b`。
+    Biases,
+    /// 上の両方。
+    All,
+}
+
+/// 新規初期化した trainer の raw checkpoint を書き、stack `stack` の重み (`w`) だけを `value` に
+/// 置き換えたコピーを `variant` に書く。optimizer 状態 (`m` / `v` / `slow`) は触らない。
+/// 返り値は、ファイル内の group の並び `(名前, 要素数)`。
+fn write_checkpoint_with_stack_value(
+    base: &std::path::Path,
+    variant: &std::path::Path,
+    groups: &[(&'static str, usize)],
+    options: &LayerStackTestOptions,
+    stack: usize,
+    value: f32,
+    target: StackTensors,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = std::fs::read(base)?;
+    // group は `u64 len` に続けて `w` `m` `v` `slow` (各 len 個の f32) の順で、ファイルの末尾まで並ぶ。
+    let total: usize = groups.iter().map(|(_, len)| 8 + 16 * len).sum();
+    let mut offset = bytes.len() - total;
+    let l2_in = (options.l1_out - 1) * 2;
+    let per_stack = |name: &str| match (name, target) {
+        ("l1_w", StackTensors::Weights | StackTensors::All) => {
+            Some(options.l1_out * options.ft_out)
+        }
+        ("l2_w", StackTensors::Weights | StackTensors::All) => Some(options.l2_out * l2_in),
+        ("l3_w", StackTensors::Weights | StackTensors::All) => Some(options.l2_out),
+        ("l1_b", StackTensors::Biases | StackTensors::All) => Some(options.l1_out),
+        ("l2_b", StackTensors::Biases | StackTensors::All) => Some(options.l2_out),
+        ("l3_b", StackTensors::Biases | StackTensors::All) => Some(1),
+        _ => None,
+    };
+    let mut patched = 0;
+    for &(name, len) in groups {
+        assert_eq!(
+            u64::from_le_bytes(bytes[offset..offset + 8].try_into()?),
+            len as u64,
+            "group {name} length field"
+        );
+        let w_start = offset + 8;
+        if let Some(per) = per_stack(name) {
+            for index in stack * per..(stack + 1) * per {
+                let at = w_start + 4 * index;
+                bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            patched += per;
+        }
+        offset = w_start + 16 * len;
+    }
+    assert_eq!(
+        offset,
+        bytes.len(),
+        "groups must end at the end of the file"
+    );
+    assert!(patched > 0);
+    std::fs::write(variant, bytes)?;
+    Ok(())
+}
+
+/// `checkpoint` から再開した trainer で、bucket 0..=7 だけへ局面を送る学習を 12 step 回す。
+fn train_padded_from_checkpoint(
+    context: &std::sync::Arc<CudaContext>,
+    options: LayerStackTestOptions,
+    checkpoint: &std::path::Path,
+) -> Result<(LayerStackRawCheckpointState, u64), Box<dyn std::error::Error>> {
+    let mut trainer = create_layerstack_trainer_with_options(context, true, options)?;
+    trainer.load_raw_checkpoint(checkpoint)?;
+    let mut batch = BatchData::smoke_dummy(SMOKE_BATCH, options.feature_set);
+    for (row, bucket) in batch.bucket_idx.iter_mut().enumerate() {
+        *bucket = (row % 8) as i32;
+    }
+    for (row, score) in batch.score.iter_mut().enumerate() {
+        *score = 50.0 * ((row % 7) as f32 - 3.0);
+    }
+    batch.wdl.fill(0.8);
+    for _ in 0..12 {
+        trainer.step(&batch.as_ref(), 1.0e-3, 0.0, SMOKE_LOSS_WRM)?;
+    }
+    let loss = trainer.validate(&batch.as_ref(), 0.0, SMOKE_LOSS_WRM)?.loss;
+    Ok((trainer.raw_checkpoint_state_to_host()?, loss.to_bits()))
+}
+
+/// 2 つの学習結果の tensor を、`w` `m` `v` `slow` について比べる。stack 別の tensor は
+/// `skip_stack` の分を除いて比べ、除いた分の `w` の違い数を別に返す。
+struct TensorDifference {
+    name: &'static str,
+    /// bit が異なる要素数 (stack 別の tensor は `skip_stack` の分を除く)。
+    differing: usize,
+    /// 要素の差の絶対値の最大値。
+    max_abs: f32,
+    /// 比べた要素の絶対値の最大値 (差の相対的な大きさを見るため)。
+    max_magnitude: f32,
+}
+
+fn compare_outside_stack(
+    a: &LayerStackRawCheckpointState,
+    b: &LayerStackRawCheckpointState,
+    options: &LayerStackTestOptions,
+    skip_stack: usize,
+) -> (Vec<TensorDifference>, usize) {
+    assert_eq!(a.0, b.0, "optimizer step counters");
+    assert_eq!(a.1.len(), b.1.len());
+    let l2_in = (options.l1_out - 1) * 2;
+    let per_stack = |name: &str| match name {
+        "l1_w" => Some(options.l1_out * options.ft_out),
+        "l1_b" => Some(options.l1_out),
+        "l2_w" => Some(options.l2_out * l2_in),
+        "l2_b" => Some(options.l2_out),
+        "l3_w" => Some(options.l2_out),
+        "l3_b" => Some(1),
+        _ => None,
+    };
+    let mut outside = Vec::new();
+    let mut skipped_w_differences = 0;
+    for ((name, ga), (name_b, gb)) in a.1.iter().zip(&b.1) {
+        assert_eq!(name, name_b);
+        let skip = per_stack(name).map(|per| skip_stack * per..(skip_stack + 1) * per);
+        let mut difference = TensorDifference {
+            name,
+            differing: 0,
+            max_abs: 0.0,
+            max_magnitude: 0.0,
+        };
+        for (which, (xa, xb)) in [
+            (&ga.0, &gb.0),
+            (&ga.1, &gb.1),
+            (&ga.2, &gb.2),
+            (&ga.3, &gb.3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(xa.len(), xb.len());
+            for (index, (x, y)) in xa.iter().zip(xb.iter()).enumerate() {
+                if let Some(range) = &skip
+                    && range.contains(&index)
+                {
+                    if which == 0 && x.to_bits() != y.to_bits() {
+                        skipped_w_differences += 1;
+                    }
+                    continue;
+                }
+                difference.max_magnitude = difference.max_magnitude.max(x.abs());
+                if x.to_bits() != y.to_bits() {
+                    difference.differing += 1;
+                    difference.max_abs = difference.max_abs.max((x - y).abs());
+                }
+            }
+        }
+        outside.push(difference);
+    }
+    (outside, skipped_w_differences)
+}
+
+/// 揺れの許容幅。GPU の勾配集計は `atomicAdd` なので加算順が run ごとに変わり、同じ入力の
+/// 2 回の学習でも bit 一致しない。そこで tensor ごとに、同一入力の 2 回の差の最大値の 16 倍と、
+/// その tensor の最大絶対値の 2e-5 倍のうち大きい方を、「揺れの範囲」とする。
+fn within_run_to_run_noise(
+    noise: &[TensorDifference],
+    signal: &[TensorDifference],
+) -> Vec<&'static str> {
+    noise
+        .iter()
+        .zip(signal)
+        .filter(|(noise, signal)| {
+            let tolerance = (16.0 * noise.max_abs).max(2.0e-5 * signal.max_magnitude);
+            signal.max_abs > tolerance
+        })
+        .map(|(_, signal)| signal.name)
+        .collect()
+}
+
+/// 学習結果のうち、stack 8 以外の tensor を比べた結果。
+struct IndependenceRun {
+    /// 同一入力の 2 回の学習の差 (揺れ)。
+    noise: Vec<TensorDifference>,
+    /// stack 8 の初期値だけを変えた学習との差。
+    signal: Vec<TensorDifference>,
+    control_loss: f64,
+    changed_loss: f64,
+    /// 学習後も stack 8 の `w` が違う要素数 (比較が意味を持つ条件)。
+    stack_eight_w: usize,
+}
+
+fn run_independence(
+    context: &std::sync::Arc<CudaContext>,
+    options: LayerStackTestOptions,
+    base: &std::path::Path,
+    variant: &std::path::Path,
+) -> Result<IndependenceRun, Box<dyn std::error::Error>> {
+    let (control, control_loss) = train_padded_from_checkpoint(context, options, base)?;
+    let (control_again, _) = train_padded_from_checkpoint(context, options, base)?;
+    let (changed, changed_loss) = train_padded_from_checkpoint(context, options, variant)?;
+    let (noise, _) = compare_outside_stack(&control, &control_again, &options, 8);
+    let (signal, stack_eight_w) = compare_outside_stack(&control, &changed, &options, 8);
+    Ok(IndependenceRun {
+        noise,
+        signal,
+        control_loss: f64::from_bits(control_loss),
+        changed_loss: f64::from_bits(changed_loss),
+        stack_eight_w,
+    })
+}
+
+fn report_independence(label: &str, run: &IndependenceRun) {
+    eprintln!(
+        "[unused-stack] {label}: loss control={:.9e} changed={:.9e}, stack 8 w differs in {} elements",
+        run.control_loss, run.changed_loss, run.stack_eight_w
+    );
+    for (noise, signal) in run.noise.iter().zip(&run.signal) {
+        eprintln!(
+            "[unused-stack]   {:16} noise max|d|={:.3e}  changed max|d|={:.3e} (n={}) max|x|={:.3e}",
+            signal.name, noise.max_abs, signal.max_abs, signal.differing, signal.max_magnitude
+        );
+    }
+}
+
+/// stack 8 の初期値だけが違う 2 回の学習の差を、stack 8 以外の全 tensor (FT、stack 0..=7、
+/// L1 shared を含む `w` `m` `v` `slow`) と検証 loss について調べる。
+///
+/// - norm loss を使わなければ、差は同一入力の 2 回の差 (GPU の加算順の揺れ) と同じ範囲に
+///   収まる。局面を受けない stack の重みは、weight decay や Ranger の lookahead があっても
+///   ほかの重みの学習に影響しない。
+/// - `--norm-loss` を使うと、bias は tensor 全体で 1 つの L2 norm を取って補正するため、stack 8
+///   の bias の値がほかの stack の bias の補正量に入り込み、差が揺れを超える。stack 8 の
+///   weight は出力ニューロンの行ごとに norm を取るので、影響しない。
+#[test]
+fn unused_stack_initial_value_and_other_tensors() -> Result<(), Box<dyn std::error::Error>> {
+    let context = test_cuda_context()?;
+    let base_options = LayerStackTestOptions {
+        num_buckets: 9,
+        bucket_mode: BucketMode::ProgressKpAbsQ16Padded,
+        ..LayerStackTestOptions::standard()
+    };
+    let dir = std::env::temp_dir().join(format!("tatara-unused-stack-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let base = dir.join("base.ckpt");
+    let groups = {
+        // 新規初期化 (既定 seed) の状態を、step 0 の raw checkpoint として書く。slow weight は 0。
+        let trainer = create_layerstack_trainer_with_options(&context, true, base_options)?;
+        trainer.save_raw_checkpoint(
+            &base,
+            0,
+            &nnue_train::trainer::CheckpointProducer::run_id_only("unused-stack"),
+            None,
+        )?;
+        trainer
+            .raw_ckpt_group_sources()
+            .iter()
+            .map(|group| (group.name, group.len))
+            .collect::<Vec<_>>()
+    };
+    let variant = |target: StackTensors, name: &str| -> Result<_, Box<dyn std::error::Error>> {
+        let path = dir.join(format!("variant-{name}.ckpt"));
+        write_checkpoint_with_stack_value(&base, &path, &groups, &base_options, 8, 0.5, target)?;
+        Ok(path)
+    };
+    let all = variant(StackTensors::All, "all")?;
+    let weights_only = variant(StackTensors::Weights, "weights")?;
+    let biases_only = variant(StackTensors::Biases, "biases")?;
+
+    // norm loss なし: stack 8 の初期値を変えても、ほかの tensor は揺れの範囲を出ない。
+    let without_norm_loss: [(&str, OptimizerKind, f32); 3] = [
+        ("AdamW wd=0.01", OptimizerKind::AdamW, 0.01),
+        ("Ranger wd=0 (from scratch)", OptimizerKind::Ranger, 0.0),
+        ("Ranger wd=0.01", OptimizerKind::Ranger, 0.01),
+    ];
+    for (label, optimizer, weight_decay) in without_norm_loss {
+        let options = LayerStackTestOptions {
+            optimizer,
+            weight_decay,
+            ..base_options
+        };
+        let run = run_independence(&context, options, &base, &all)?;
+        report_independence(label, &run);
+        assert!(
+            run.stack_eight_w > 0,
+            "{label}: stack 8 weights should differ"
+        );
+        let moved = within_run_to_run_noise(&run.noise, &run.signal);
+        assert!(
+            moved.is_empty(),
+            "{label}: tensors outside stack 8 moved: {moved:?}"
+        );
+        let loss_tolerance = 1.0e-6 * run.control_loss.abs();
+        assert!(
+            (run.control_loss - run.changed_loss).abs() <= loss_tolerance,
+            "{label}: validation loss {} vs {}",
+            run.control_loss,
+            run.changed_loss
+        );
+    }
+
+    // norm loss あり: weight だけを変えても影響せず、bias を変えると影響する。
+    let with_norm_loss: [(&str, OptimizerKind, f32); 3] = [
+        ("RAdam norm-loss", OptimizerKind::RAdam, 0.0),
+        ("AdamW norm-loss", OptimizerKind::AdamW, 0.0),
+        ("Ranger wd=0.01 norm-loss", OptimizerKind::Ranger, 0.01),
+    ];
+    for (label, optimizer, weight_decay) in with_norm_loss {
+        let options = LayerStackTestOptions {
+            optimizer,
+            weight_decay,
+            norm_loss_factor: Some(1.0e-4),
+            ..base_options
+        };
+        let weights = run_independence(&context, options, &base, &weights_only)?;
+        report_independence(&format!("{label} (stack 8 weights changed)"), &weights);
+        assert!(
+            weights.stack_eight_w > 0,
+            "{label}: stack 8 weights should differ"
+        );
+        let moved = within_run_to_run_noise(&weights.noise, &weights.signal);
+        assert!(
+            moved.is_empty(),
+            "{label}: changing only the stack 8 weights moved {moved:?}"
+        );
+
+        let biases = run_independence(&context, options, &base, &biases_only)?;
+        report_independence(&format!("{label} (stack 8 biases changed)"), &biases);
+        // 揺れの小さい RAdam と Ranger では、stack 8 の bias が bias 全体の norm を通して
+        // ほかの stack の bias を動かすことが、揺れを大きく超えて見える。
+        if optimizer != OptimizerKind::AdamW {
+            let moved = within_run_to_run_noise(&biases.noise, &biases.signal);
+            for name in ["l1_b", "l2_b"] {
+                assert!(
+                    moved.contains(&name),
+                    "{label}: {name} should be moved by the stack 8 biases, moved: {moved:?}"
+                );
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }

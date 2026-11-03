@@ -562,6 +562,7 @@ fn raw_ckpt_v8_bucket_modes_round_trip() {
         layerstack_arch_with_mode("progresskpabs"),
         layerstack_arch_with_mode("progresskpabsq16"),
         layerstack_arch_with_mode("progresskpabsq16ek"),
+        layerstack_arch_with_mode("progresskpabsq16pad"),
         layerstack_arch_with_mode("kingrank9"),
         simple_arch(),
     ] {
@@ -614,6 +615,13 @@ fn raw_ckpt_v8_rejects_cross_bucket_mode_resume_in_both_directions() {
         ("progresskpabsq16ek", "progresskpabs"),
         ("progresskpabsq16ek", "kingrank9"),
         ("kingrank9", "progresskpabsq16ek"),
+        ("progresskpabsq16pad", "progresskpabsq16"),
+        ("progresskpabsq16", "progresskpabsq16pad"),
+        ("progresskpabsq16pad", "progresskpabsq16ek"),
+        ("progresskpabsq16ek", "progresskpabsq16pad"),
+        ("progresskpabsq16pad", "progresskpabs"),
+        ("progresskpabsq16pad", "kingrank9"),
+        ("kingrank9", "progresskpabsq16pad"),
     ] {
         let mut buf = Vec::new();
         write_raw_ckpt_header(

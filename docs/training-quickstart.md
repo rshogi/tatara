@@ -22,7 +22,7 @@ examples:
 | File | Format | Purpose | Approx. size |
 |---|---|---|---:|
 | Training data PSV | `PackedSfenValue` × N (fixed 40 bytes / position) | Passed via `--data` | Hundreds of GB |
-| progress coefficients | `progress.bin` (f64 LE; 81 king squares × 1548 KP-abs piece inputs = fixed `1_003_104` bytes) | Passed via `--progress-coeff` for LayerStack `progresskpabs` / `progresskpabsq16` / `progresskpabsq16ek` mode. Not used by `kingrank9` or `simple` | 1.0 MB |
+| progress coefficients | `progress.bin` (f64 LE; 81 king squares × 1548 KP-abs piece inputs = fixed `1_003_104` bytes) | Passed via `--progress-coeff` for LayerStack `progresskpabs` / `progresskpabsq16` / `progresskpabsq16ek` / `progresskpabsq16pad` mode. Not used by `kingrank9` or `simple` | 1.0 MB |
 | (optional) pretrained NNUE | quantised `.bin` (`save_quantised` format) | Injects weights via `--init-from` (the optimizer is reset) | — |
 
 ## Example 1: Training a HalfKP NNUE (simple architecture)
@@ -64,7 +64,7 @@ options" below.
 
 ## Example 2: Training a LayerStack NNUE
 
-The `layerstack` architecture supports four bucket modes. The default
+The `layerstack` architecture supports five bucket modes. The default
 `progresskpabs` mode uses 2–9 game-progress buckets; prepare `progress.bin`
 with `progress-kpabs-train` and inspect it with `progress-bucket-survey`, as
 described in [Game-progress buckets: preparing `progress.bin`](progress-bin.md).
@@ -83,6 +83,16 @@ to bucket 0 to 7 by splitting the Q16 progress into 8 parts. It needs the same
 `progress.bin` as `progresskpabsq16`. The bucket rule is the one YaneuraOu uses
 with `LS_BUCKET_MODE progress8ek` for the `..._progress8ek` networks; see
 [Converting a net to YaneuraOu](net-to-yaneuraou.md) for the engine side.
+`progresskpabsq16pad` splits the Q16 progress into 8 parts, the same buckets as
+`progresskpabsq16` with `--num-buckets 8`, but keeps 9 stacks and never looks at
+the kings: no position is sent to stack 8, so its weights are not trained. It needs
+the same `progress.bin`. It is the bucket rule YaneuraOu uses with its default
+`LS_BUCKET_MODE progress8kpabs` for the `..._progress8kpabs` networks. The optimizer's
+weight decay and norm loss act on every stack, so with `--weight-decay` or
+`--norm-loss` the weights of stack 8 still move; the engine never reads them. They
+do not affect how the other stacks train, with one exception: `--norm-loss` takes
+one L2 norm over each whole bias tensor, so the bias values of stack 8 enter the
+correction applied to the biases of the other stacks.
 `kingrank9` matches YaneuraOu KingRank9: it normalises both king ranks to the
 side-to-move perspective and selects one of a fixed 3x3 grid of 9 buckets. It
 does not use `progress.bin`.
@@ -111,6 +121,9 @@ coefficients (`--num-buckets` stays at its default 9):
   layerstack --bucket-mode progresskpabsq16ek --progress-coeff <path/to/progress.bin>
 ```
 
+For the 9-stack rule that uses stacks 0 to 7 only, replace `progresskpabsq16ek`
+with `progresskpabsq16pad`.
+
 `layerstack` defaults to `--feature-set halfka-hm-merged` / 9 buckets. The FT
 output dimension can be changed with `--ft-out` (a multiple of 128, default
 1536).
@@ -137,8 +150,8 @@ change for real training are:
 | `--teacher-shuffle-seed` | 0 | Base seed combined with the dataset epoch and window index (takes effect only when `--teacher-shuffle-buffer-mib > 0`). The same value reproduces each window permutation, but with `--threads >= 2`, worker completion can still change the final batch-delivery order |
 | `--test-tail-positions` | none | Reserve the last N positions of `--data` as a held-out validation set in the same file (see "Held-out validation" below). Recommended whenever you want held-out validation |
 | `--test-positions` | 10000 | Number of positions evaluated each superbatch from the held-out source. Used only with `--test-tail-positions` or `--test-data` |
-| `--bucket-mode` (`layerstack`) | progresskpabs | `progresskpabs` routes by the KP-absolute progress estimate. `progresskpabsq16` routes by the same estimate in integer Q16 arithmetic. `progresskpabsq16ek` is the Q16 routing with an extra bucket 8 for mutual entering-king positions (progress is split into 8 parts for the rest) and requires 9 buckets. `kingrank9` matches YaneuraOu KingRank9, requires 9 buckets, and rejects `--progress-coeff` |
-| `--num-buckets` (`layerstack`) | 9 | In `progresskpabs` / `progresskpabsq16` mode, an integer in `[2, 9]`; positions route to `min(N-1, floor(progress * N))`. In `kingrank9` and `progresskpabsq16ek` modes this must be 9 |
+| `--bucket-mode` (`layerstack`) | progresskpabs | `progresskpabs` routes by the KP-absolute progress estimate. `progresskpabsq16` routes by the same estimate in integer Q16 arithmetic. `progresskpabsq16ek` is the Q16 routing with an extra bucket 8 for mutual entering-king positions (progress is split into 8 parts for the rest) and requires 9 buckets. `progresskpabsq16pad` is the Q16 routing that splits progress into 8 parts, never sends a position to bucket 8, and requires 9 buckets. `kingrank9` matches YaneuraOu KingRank9, requires 9 buckets, and rejects `--progress-coeff` |
+| `--num-buckets` (`layerstack`) | 9 | In `progresskpabs` / `progresskpabsq16` mode, an integer in `[2, 9]`; positions route to `min(N-1, floor(progress * N))`. In `kingrank9`, `progresskpabsq16ek` and `progresskpabsq16pad` modes this must be 9 |
 
 ### Teacher-data read-ahead and shuffle
 

@@ -151,23 +151,30 @@ default `--activation crelu`.
 | `halfkp_768x2_16_64` | `simple` | `halfkp` | `--arch 768x2-16-64` |
 | `kp_256x2_32_32` | `simple` | `kp` | `--arch 256x2-32-32` |
 
-Two `layerstack` networks are also written in the file layout of the NAGISA
-evaluation files. They route each position to one of 9 stacks: bucket 8 for
-positions where both kings have entered the middle of the board, buckets 0–7
-by game progress, which needs the `progress.bin` that was used in training.
+Three `layerstack` networks are also written in the file layout of the NAGISA
+evaluation files. They hold 9 stacks and pick one by game progress (buckets
+0–7), which needs the `progress.bin` that was used in training. The two
+`progress8ek` networks send positions where both kings have entered the middle
+of the board to bucket 8; `progress8kpabs` never uses stack 8.
 
 | Network | Subcommand | `--feature-set` | Options after the subcommand |
 |---|---|---|---|
 | `halfkahm2_1024_15_64_progress8ek` | `layerstack` | `halfka-hm-merged` | `--ft-out 1024 --l1 16 --l2 64 --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin>` |
 | `halfkahm2_2304_15_64_progress8ek` | `layerstack` | `halfka-hm-merged` | `--ft-out 2304 --l1 16 --l2 64 --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin>` |
+| `halfkahm2_1024_15_64_progress8kpabs` | `layerstack` | `halfka-hm-merged` | `--ft-out 1024 --l1 16 --l2 64 --bucket-mode progresskpabsq16pad --progress-coeff <progress.bin>` |
 
 The `.bin` that `nnue-train` writes for these is converted with
-`net_to_yo --assume-progresskpabsq16ek` ([details](docs/net-to-yaneuraou.md)). The
-converted file's network name ends in `_K3K3`, the same as a KingRank9 net, so the
-engine must be told which bucket rule applies: put `LS_BUCKET_MODE progress8ek` and the
-`progress.bin` next to `nn.bin` in the evaluation directory (`eval_options.txt`). With
-the default `progress8kpabs` the engine loads the file without a warning and picks
-different stacks.
+`net_to_yo --assume-progresskpabsq16ek` (the `progress8ek` networks) or
+`net_to_yo --assume-progresskpabsq16pad` (`progress8kpabs`)
+([details](docs/net-to-yaneuraou.md)). The converted file's network name ends in
+`_K3K3`, the same as a KingRank9 net, so the engine must be told which bucket rule
+applies. Put the `progress.bin` next to `nn.bin` in the evaluation directory. For
+`progress8ek`, also write `LS_BUCKET_MODE progress8ek` in `eval_options.txt`; with the
+default `progress8kpabs` the engine loads the file without a warning and picks
+different stacks. `progress8kpabs` is the engine's default `LS_BUCKET_MODE`. Stack 8 of
+a `progress8kpabs` network receives no position in training, so nothing is learned
+there, and its weights do not affect how the other stacks train (see
+[details](docs/net-to-yaneuraou.md) for `--norm-loss`).
 
 The names follow the network naming of the
 [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) fork

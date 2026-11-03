@@ -15,6 +15,8 @@
 //!   bucket (8)、それ以外は 8 bucket の Q16 割当。N = 8 の閾値 `ln(i / (8 - i))` は、
 //!   256 段階の進行度 (閾値 `ln(k / (256 - k))`、`k = 1..255`) を `progress * 8 / 256` で
 //!   8 段に落とした境界 (`k = 32 * i`) と同じ値になる
+//! - 9 stack のうち 0..=7 だけを使う Q16 割当: 進行度を 8 等分する `bucket_q16_board` を
+//!   そのまま使い、相入玉は見ない。stack 8 には局面を送らない
 
 use std::path::Path;
 use std::sync::OnceLock;
@@ -25,6 +27,14 @@ use crate::entering_king::{
 use shogi_format::bona_piece::FE_OLD_END;
 use shogi_format::types::HAND_PIECE_TYPES;
 use shogi_format::{BonaPiece, Color, PackedSfenValue, ShogiBoard};
+
+/// 9 stack の LayerStack のうち、進行度の割当に使う stack の数 (`0..8`)。
+/// 残りの最後の 1 stack は局面を受けず、勾配を受けない。
+pub const PADDED_PROGRESS_BUCKETS: usize = 8;
+
+/// 進行度を 8 等分する割当を、末尾に使わない stack を 1 つ足した LayerStack に載せたときの
+/// stack 数。
+pub const PADDED_PROGRESS_NUM_STACKS: usize = PADDED_PROGRESS_BUCKETS + 1;
 
 /// KP-absolute 特徴の次元数: `81 * FE_OLD_END`。
 pub const SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS: usize = 81 * FE_OLD_END;
@@ -458,6 +468,21 @@ mod tests {
             let want = progress_0_to_255_reference(sum) * 8 / 256;
             assert_eq!(usize::from(q16_sum_to_bucket(sum, 8)), want, "sum {sum}");
         }
+    }
+
+    #[test]
+    fn padded_progress_split_never_reaches_the_last_stack() {
+        // 8 等分の割当が返す bucket は 0..=7 で、9 stack の末尾 (8) には届かない。
+        assert_eq!(PADDED_PROGRESS_NUM_STACKS, PADDED_PROGRESS_BUCKETS + 1);
+        let last_stack = PADDED_PROGRESS_NUM_STACKS - 1;
+        for sum in [i64::MIN, -1_000_000, -1, 0, 1, 1_000_000, i64::MAX] {
+            let bucket = usize::from(q16_sum_to_bucket(sum, PADDED_PROGRESS_BUCKETS));
+            assert!(bucket < last_stack, "sum {sum} -> bucket {bucket}");
+        }
+        assert_eq!(
+            usize::from(q16_sum_to_bucket(i64::MAX, PADDED_PROGRESS_BUCKETS)),
+            PADDED_PROGRESS_BUCKETS - 1
+        );
     }
 
     #[test]

@@ -138,20 +138,28 @@ v9 以降の checkpoint では再指定不要。v8 以前から resume する場
 | `halfkp_768x2_16_64` | `simple` | `halfkp` | `--arch 768x2-16-64` |
 | `kp_256x2_32_32` | `simple` | `kp` | `--arch 256x2-32-32` |
 
-`layerstack` のネットワークも 2 つ、NAGISA の評価関数ファイルと同じ file 構造で書き出せる。
-局面を 9 個の stack に振り分け、両玉が盤の中央まで入った局面は bucket 8、それ以外は
-進行度で bucket 0〜7 になる。進行度には、学習に使った `progress.bin` が要る。
+`layerstack` のネットワークも 3 つ、NAGISA の評価関数ファイルと同じ file 構造で書き出せる。
+9 個の stack を持ち、進行度で stack (bucket 0〜7) を選ぶ。進行度には、学習に使った
+`progress.bin` が要る。`progress8ek` の 2 つは、両玉が盤の中央まで入った局面を bucket 8
+に振り分ける。`progress8kpabs` は stack 8 を使わない。
 
 | ネットワーク | サブコマンド | `--feature-set` | サブコマンドの後ろの option |
 |---|---|---|---|
 | `halfkahm2_1024_15_64_progress8ek` | `layerstack` | `halfka-hm-merged` | `--ft-out 1024 --l1 16 --l2 64 --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin>` |
 | `halfkahm2_2304_15_64_progress8ek` | `layerstack` | `halfka-hm-merged` | `--ft-out 2304 --l1 16 --l2 64 --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin>` |
+| `halfkahm2_1024_15_64_progress8kpabs` | `layerstack` | `halfka-hm-merged` | `--ft-out 1024 --l1 16 --l2 64 --bucket-mode progresskpabsq16pad --progress-coeff <progress.bin>` |
 
-`nnue-train` が書く `.bin` は `net_to_yo --assume-progresskpabsq16ek` で変換する
+`nnue-train` が書く `.bin` は、`progress8ek` のネットワークなら
+`net_to_yo --assume-progresskpabsq16ek`、`progress8kpabs` なら
+`net_to_yo --assume-progresskpabsq16pad` で変換する
 ([詳細](docs/net-to-yaneuraou.md))。変換後のファイルの Network 名は KingRank9 の net と
 同じ `_K3K3` で終わるので、どの bucket 規則かはエンジンに教える必要がある。評価関数の
-directory に `nn.bin` と `progress.bin` を置き、`eval_options.txt` に `LS_BUCKET_MODE progress8ek`
-と書く。既定の `progress8kpabs` のままだと、エンジンは警告なしに読み込み、別の stack を選ぶ。
+directory に `nn.bin` と並べて `progress.bin` を置く。`progress8ek` のときは
+`eval_options.txt` に `LS_BUCKET_MODE progress8ek` と書く。既定の `progress8kpabs` のままだと、
+エンジンは警告なしに読み込み、別の stack を選ぶ。`progress8kpabs` はエンジンの
+`LS_BUCKET_MODE` の既定値である。`progress8kpabs` のネットワークの stack 8 には学習中に
+局面が一つも送られないので、そこでは何も学習されず、その重みはほかの stack の学習に影響しない
+(`--norm-loss` の場合は[詳細](docs/net-to-yaneuraou.md)を参照)。
 
 ネットワーク名は [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) フォークの
 命名 (`NNUE_<feature>_<FT>x2_<H1>_<H2>`、同フォークの

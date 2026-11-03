@@ -32,6 +32,11 @@ pub enum YaneuraOuRouting {
     /// YaneuraOu は進行度係数を `progress.bin` から読み、`LS_BUCKET_MODE` を
     /// `progress8ek` にして初めて同じ bucket を選ぶ。
     ProgressKpAbsQ16EnteringKing,
+    /// 進行度を 8 等分した bucket 0..=7 だけを使い、相入玉は見ない (tatara の
+    /// `progresskpabsq16pad`)。LayerStack は 9 で、最後の 1 stack は局面を受けず、勾配を受けない。
+    /// Network 名は `_K3K3` になる。YaneuraOu は進行度係数を `progress.bin` から読み、
+    /// `LS_BUCKET_MODE` の既定 (`progress8kpabs`) で同じ bucket を選ぶ。
+    ProgressKpAbsQ16Padded,
 }
 
 const MAX_FT_OUT: usize = 8192;
@@ -175,6 +180,11 @@ fn architecture(
                 "entering-king routing requires {YANEURAOU_LAYER_STACKS} LayerStacks, but weights have {num_buckets} buckets"
             ));
         }
+        YaneuraOuRouting::ProgressKpAbsQ16Padded if num_buckets != YANEURAOU_LAYER_STACKS => {
+            return invalid_input(format!(
+                "padded progress routing requires {YANEURAOU_LAYER_STACKS} LayerStacks, but weights have {num_buckets} buckets"
+            ));
+        }
         YaneuraOuRouting::ProgressKpAbs
             if num_buckets == 0 || num_buckets > MAX_PROGRESS_KPABS_BUCKETS =>
         {
@@ -205,9 +215,9 @@ fn arch_string(arch: &Architecture) -> String {
     // 生成器 (`nnue_arch_gen.py`) は layer stack token を `_` で連結し、bucket が 1 つの
     // ときは token を付けない。`SFNN-1536` は KingRank9 の既定構造に限る。
     let layer_stack_token = match arch.routing {
-        YaneuraOuRouting::KingRank9 | YaneuraOuRouting::ProgressKpAbsQ16EnteringKing => {
-            "_k3k3".to_string()
-        }
+        YaneuraOuRouting::KingRank9
+        | YaneuraOuRouting::ProgressKpAbsQ16EnteringKing
+        | YaneuraOuRouting::ProgressKpAbsQ16Padded => "_k3k3".to_string(),
         YaneuraOuRouting::ProgressKpAbs if arch.num_buckets == 1 => String::new(),
         YaneuraOuRouting::ProgressKpAbs => format!("_progress{}", arch.num_buckets),
     };
@@ -467,6 +477,37 @@ mod tests {
             let arch =
                 architecture(&weights, YaneuraOuRouting::ProgressKpAbsQ16EnteringKing).unwrap();
             assert_eq!(arch_string(&arch), expected);
+        }
+    }
+
+    #[test]
+    fn padded_progress_architecture_names_use_the_k3k3_token() {
+        let weights = LayerStackWeights::zeroed(
+            FeatureSet::HalfKaHmMerged.spec(),
+            1024,
+            16,
+            64,
+            YANEURAOU_LAYER_STACKS,
+        );
+        let arch = architecture(&weights, YaneuraOuRouting::ProgressKpAbsQ16Padded).unwrap();
+        assert_eq!(
+            arch_string(&arch),
+            "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->1024x2],Network=SFNN_HALFKAHM2_1024_15_64_K3K3{LayerStack=9}"
+        );
+    }
+
+    #[test]
+    fn padded_progress_requires_nine_layer_stacks() {
+        for buckets in [1, 8, 10] {
+            let weights =
+                LayerStackWeights::zeroed(FeatureSet::HalfKaHmMerged.spec(), 128, 16, 32, buckets);
+            let error = save_yaneuraou_with_routing(
+                &mut Vec::new(),
+                &weights,
+                YaneuraOuRouting::ProgressKpAbsQ16Padded,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("padded progress"), "{error}");
         }
     }
 
