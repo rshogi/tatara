@@ -36,12 +36,12 @@ default and around **+55%** with `--all-optim` (FP16/TF32).
 **Throughput** (`--batch-size 65536`, pos/s; fp32 → `--all-optim` (fp16/tf32)). The
 `--all-optim` gain is larger on older, more bandwidth-bound GPUs and on bigger nets:
 
-| arch / config (feature) | RTX 5090 | RTX 3080 Ti | RTX 4070 Ti |
+| arch / config (feature) | RTX 3080 Ti (Ampere) | RTX 4070 Ti (Ada) | RTX 5090 (Blackwell) |
 |---|---|---|---|
-| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 2.45M → 3.13M (+28%) | 0.99M → 1.59M (+61%) | 1.26M → 2.14M (+70%) |
-| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 4.24M → 5.10M (+20%) | 2.05M → 2.97M (+45%) | 2.69M → 4.14M (+54%) |
-| Simple `256x2-32-32` (`halfkp`) | 11.29M → 13.37M (+18%) | 7.30M → 10.10M (+38%) | 5.79M → 7.85M (+35%) |
-| Simple `256x2-32-32` (`kp`) | – | – | 6.69M → 6.15M (−8%) |
+| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 0.99M → 1.59M (+61%) | 1.26M → 2.14M (+70%) | 2.45M → 3.13M (+28%) |
+| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 2.05M → 2.97M (+45%) | 2.69M → 4.14M (+54%) | 4.24M → 5.10M (+20%) |
+| Simple `256x2-32-32` (`halfkp`) | 7.30M → 10.10M (+38%) | 5.79M → 7.85M (+35%) | 11.29M → 13.37M (+18%) |
+| Simple `256x2-32-32` (`kp`) | – | 6.69M → 6.15M (−8%) | – |
 
 The RTX 4070 Ti (12 GB) column is the mean of two runs of the command below with the
 teacher file in the page cache and `--superbatches 3` (`--batches-per-superbatch 60` for
@@ -139,28 +139,27 @@ from [a post by nodchip](https://nodchip.hatenablog.com/entry/2026/02/04/000000)
 ### Networks YaneuraOu loads
 
 A `--feature-set` alone does not name a network: the width of the feature
-transformer and the two hidden layers are part of it, and a YaneuraOu build is
-compiled for exactly one such network. These four `simple` networks are
-written in the file layout of the YaneuraOu evaluation file of the same name,
-so a build of the listed edition loads the `.bin` without conversion. All four
-use the default `--activation crelu`.
+transformer and the two hidden layers are part of it. These four `simple`
+networks are written in the file layout of the YaneuraOu evaluation file of the
+same name, so YaneuraOu loads the `.bin` without conversion. All four use the
+default `--activation crelu`.
 
-| Network | `--feature-set` | `simple --arch` | YaneuraOu `YANEURAOU_EDITION` |
+| Network | Subcommand | `--feature-set` | Options after the subcommand |
 |---|---|---|---|
-| `halfkp_128x2_32_32` | `halfkp` | `128x2-32-32` | `YANEURAOU_ENGINE_NNUE_halfkp_128x2_32_32` |
-| `halfkp_256x2_32_32` | `halfkp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE` |
-| `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
-| `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
+| `halfkp_128x2_32_32` | `simple` | `halfkp` | `--arch 128x2-32-32` |
+| `halfkp_256x2_32_32` | `simple` | `halfkp` | `--arch 256x2-32-32` |
+| `halfkp_768x2_16_64` | `simple` | `halfkp` | `--arch 768x2-16-64` |
+| `kp_256x2_32_32` | `simple` | `kp` | `--arch 256x2-32-32` |
 
 Two `layerstack` networks are also written in the file layout of the NAGISA
 evaluation files. They route each position to one of 9 stacks: bucket 8 for
 positions where both kings have entered the middle of the board, buckets 0–7
 by game progress, which needs the `progress.bin` that was used in training.
 
-| Network | `layerstack` options | YaneuraOu `YANEURAOU_EDITION` |
-|---|---|---|
-| `halfkahm2_1024_15_64_progress8ek` | `--feature-set halfka-hm-merged --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin> --ft-out 1024 --l1 16 --l2 64` | `YANEURAOU_ENGINE_SFNN_halfkahm2_1024_15_64_progress8ek` |
-| `halfkahm2_2304_15_64_progress8ek` | the same with `--ft-out 2304` | `YANEURAOU_ENGINE_SFNN_halfkahm2_2304_15_64_progress8ek` |
+| Network | Subcommand | `--feature-set` | Options after the subcommand |
+|---|---|---|---|
+| `halfkahm2_1024_15_64_progress8ek` | `layerstack` | `halfka-hm-merged` | `--ft-out 1024 --l1 16 --l2 64 --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin>` |
+| `halfkahm2_2304_15_64_progress8ek` | `layerstack` | `halfka-hm-merged` | `--ft-out 2304 --l1 16 --l2 64 --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin>` |
 
 The `.bin` that `nnue-train` writes for these is converted with
 `net_to_yo --assume-progresskpabsq16ek` ([details](docs/net-to-yaneuraou.md)). The
@@ -173,9 +172,8 @@ different stacks.
 The names follow the network naming of the
 [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) fork
 (`NNUE_<feature>_<FT>x2_<H1>_<H2>`, described in its
-`source/eval/nnue/architectures/README.md`), whose Makefile generates the
-architecture header from the edition name. An engine built for one network
-refuses a `.bin` of another with `NNUE hash mismatch` and `failed to read nn.bin`.
+`source/eval/nnue/architectures/README.md`). YaneuraOu refuses a `.bin` of
+another network with `NNUE hash mismatch` and `failed to read nn.bin`.
 
 `--init-from` also reads `.bin` files that other trainers wrote for one of
 these networks. A file is accepted when all of these hold:
@@ -315,7 +313,7 @@ architecture, some nets need additional inference code before they can be
 loaded. A supported LayerStack net can be converted to and from the YaneuraOu
 format with [`net_to_yo` / `net_from_yo`](docs/net-to-yaneuraou.md).
 The `simple` networks listed under "Networks YaneuraOu loads" are loaded by a
-YaneuraOu build of the matching edition without conversion. YaneuraOu takes the
+YaneuraOu without conversion. YaneuraOu takes the
 output scale from its `FV_SCALE` option, not from the file.
 Pre-trained reference nets are attached to the
 [GitHub Releases](https://github.com/SH11235/tatara/releases). To train your
