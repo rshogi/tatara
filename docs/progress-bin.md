@@ -5,8 +5,10 @@
 The `layerstack` architecture routes each position to one of N game-progress
 buckets, and the bucket assignment is decided by `progress.bin` — a set of
 KP-abs coefficients that estimate how far a position has advanced within its
-game. This page covers how to train `progress.bin` and how to check the bucket
-split it produces. The `simple` architecture has no buckets and does not need
+game. (With `--bucket-mode progresskpabsq16ek`, positions where both kings have
+entered the middle of the board bypass this split and go to a ninth bucket; the
+other positions use `progress.bin` as usual.) This page covers how to train
+`progress.bin` and how to check the bucket split it produces. The `simple` architecture has no buckets and does not need
 it; for the overall training flow see
 [docs/training-quickstart.md](training-quickstart.md).
 
