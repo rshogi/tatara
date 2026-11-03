@@ -36,7 +36,10 @@ pub use halfka_hm::{
     SHOGI_HALFKA_HM_NUM_ACTIVE_INDICES, SHOGI_HALFKA_HM_NUM_FEATURES, ShogiHalfKA_hm,
 };
 pub use kingrank9::{KINGRANK9_NUM_BUCKETS, kingrank9_bucket_board};
-pub use progress_kpabs::{SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS, ShogiProgressKPAbs};
+pub use progress_kpabs::{
+    PADDED_PROGRESS_BUCKETS, PADDED_PROGRESS_NUM_STACKS, SHOGI_PROGRESS_KP_ABS_NUM_WEIGHTS,
+    ShogiProgressKPAbs,
+};
 pub use psqt_material::{material_cp, psqt_material_values};
 pub use threat::{THREAT_MAX_ACTIVE, ThreatClass, ThreatIndexer, threat_dimensions_of};
 pub use threat_exclusion::ThreatProfile;
