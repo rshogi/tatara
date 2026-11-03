@@ -33,20 +33,30 @@ GPU kernel を hand-fuse することで **極めて高速** — 実測した cu
 **実効 throughput** (`--batch-size 65536`, pos/s; fp32 → `--all-optim`(fp16/tf32))。
 `--all-optim` の効果は帯域律速の強い旧世代 GPU ほど、また net が大きいほど大きい:
 
-| arch / 構成 (feature) | RTX 5090 | RTX 3080 Ti |
-|---|---|---|
-| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 2.45M → 3.13M (+28%) | 0.99M → 1.59M (+61%) |
-| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 4.24M → 5.10M (+20%) | 2.05M → 2.97M (+45%) |
-| Simple `256x2-32-32` (`halfkp`) | 11.29M → 13.37M (+18%) | 7.30M → 10.10M (+38%) |
+| arch / 構成 (feature) | RTX 5090 | RTX 3080 Ti | RTX 4070 Ti |
+|---|---|---|---|
+| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 2.45M → 3.13M (+28%) | 0.99M → 1.59M (+61%) | 1.26M → 2.14M (+70%) |
+| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 4.24M → 5.10M (+20%) | 2.05M → 2.97M (+45%) | 2.69M → 4.14M (+54%) |
+| Simple `256x2-32-32` (`halfkp`) | 11.29M → 13.37M (+18%) | 7.30M → 10.10M (+38%) | 5.79M → 7.85M (+35%) |
+| Simple `256x2-32-32` (`kp`) | – | – | 6.69M → 6.15M (−8%) |
+
+RTX 4070 Ti (12 GB) の列は、下の計測コマンドを教師 file を page cache に載せた状態で
+`--superbatches 3` (`--batches-per-superbatch` は LayerStack が 60、Simple が 150) で
+2 回回した平均。2 回の差は最大 0.2%。特徴変換器が 1,710 行しかない `kp` では、
+`--all-optim` が fp32 より遅かった。`–` は未測定。
+
+教師 file の 1 局面は 40 バイトなので、これらの速度で読むには、600 万局面/秒で約 240 MB/s
+が要る。ハードディスク (約 100 MB/s) では読み込みが律速になり、学習は約 250 万局面/秒
+までで、表の値を下回る。
 
 計測コマンド (教師データ / progress は環境依存 path、`--all-optim` の有無で pos/s を比較):
 
 ```sh
 # LayerStack (halfka-hm-merged, progress 必要)
 cargo run --release --bin nnue-train -- \
-  --data /path/to/teacher.psv --progress-coeff /path/to/progress.bin \
+  --data /path/to/teacher.psv \
   --feature-set halfka-hm-merged --batch-size 65536 --superbatches 8 [--all-optim] \
-  layerstack --ft-out {1536|768} --l1 {16|8} --l2 32
+  layerstack --progress-coeff /path/to/progress.bin --ft-out {1536|768} --l1 {16|8} --l2 32
 
 # HalfKP (simple, progress 不要; simple トレーナは --win-rate-model 必須)
 cargo run --release --bin nnue-train -- \
