@@ -49,9 +49,10 @@ LayerStack, 150 for Simple); the two runs differ by at most 0.2%. For `kp`, whos
 feature transformer has only 1,710 rows, `--all-optim` was slower than fp32. `–` means not
 measured.
 
-Each position is 40 bytes in the teacher file, so reading it at these rates takes
-about 240 MB/s for 6M positions/s. On a hard disk (about 100 MB/s) training is limited by
-the read to roughly 2.5M positions/s, below what the table shows.
+Each position is 40 bytes in the teacher file, so training at 6M positions/s reads about
+240 MB/s, and storage that reads more slowly sets a lower limit: 100 MB/s allows about
+2.5M positions/s. A hard disk may not keep up; an SSD, fast network storage, or a teacher
+file that fits in the page cache does.
 
 Measurement command (teacher-data / progress paths are environment-specific;
 compare pos/s with and without `--all-optim`):
