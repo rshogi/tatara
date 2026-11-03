@@ -6,8 +6,11 @@
 //!   合法局面の active 数固定 40)、NNUE 1536-16-32 trainer の入力。
 //! - `progress_kpabs`: KP-absolute 特徴 (`81 * FE_OLD_END` 次元) と
 //!   logistic regression による `0..=1` progress / N-bucket 割当 (caller が N を指定)。
+//! - `entering_king`: 相入玉の判定。進行度 8 bucket に相入玉 1 bucket を足した 9 bucket 割当の
+//!   一部で、割当本体は `progress_kpabs` にある。
 
 pub mod effect_bucket;
+pub mod entering_king;
 pub mod feature_set;
 pub mod halfka_hm;
 pub mod kingrank9;
@@ -22,6 +25,10 @@ pub use effect_bucket::{
     EffectBucketAttackCounts, EffectBucketConfig, collect_effect_bucket_features_board,
     effect_bucket, effect_bucket_attacker_counts, effect_bucket_index,
     map_effect_bucket_features_board, packed_is_bucketed,
+};
+pub use entering_king::{
+    ENTERING_KING_BUCKET, ENTERING_KING_NUM_BUCKETS, ENTERING_KING_PROGRESS_BUCKETS,
+    is_mutual_entering_king_board,
 };
 pub use feature_set::{FeatureSet, FeatureSetSpec, FtFactorizeMode};
 pub use halfka_hm::{

@@ -11,10 +11,17 @@
 //!   `round(ln(i / (N - i)) * 65536)` (`i = 1..N`) とする整数版。推論エンジン rshogi の
 //!   `progresskpabsq16` が同じ量子化を使う。整数和は加算順に依存しないので、
 //!   推論側が差分更新しても学習時と同じ bucket になる
+//! - 相入玉 bucket 付きの Q16 割当 (`bucket_q16_entering_king_board`): 相入玉局面は最後の
+//!   bucket (8)、それ以外は 8 bucket の Q16 割当。N = 8 の閾値 `ln(i / (8 - i))` は、
+//!   256 段階の進行度 (閾値 `ln(k / (256 - k))`、`k = 1..255`) を `progress * 8 / 256` で
+//!   8 段に落とした境界 (`k = 32 * i`) と同じ値になる
 
 use std::path::Path;
 use std::sync::OnceLock;
 
+use crate::entering_king::{
+    ENTERING_KING_BUCKET, ENTERING_KING_PROGRESS_BUCKETS, is_mutual_entering_king_board,
+};
 use shogi_format::bona_piece::FE_OLD_END;
 use shogi_format::types::HAND_PIECE_TYPES;
 use shogi_format::{BonaPiece, Color, PackedSfenValue, ShogiBoard};
@@ -217,6 +224,18 @@ impl ShogiProgressKPAbs {
     pub fn bucket_q16_board(&self, board: &ShogiBoard, num_buckets: usize) -> u8 {
         q16_sum_to_bucket(self.progress_q16_sum_board(board), num_buckets)
     }
+
+    /// 相入玉 bucket 付きの Q16 割当 (`0..=8`)。相入玉局面は最後の bucket 8、それ以外は
+    /// 進行度を 8 等分した [`Self::bucket_q16_board`] (`num_buckets = 8`)。
+    ///
+    /// 進行度の和は相入玉と判定された局面では使われないので計算しない。
+    pub fn bucket_q16_entering_king_board(&self, board: &ShogiBoard) -> u8 {
+        if is_mutual_entering_king_board(board) {
+            ENTERING_KING_BUCKET
+        } else {
+            self.bucket_q16_board(board, ENTERING_KING_PROGRESS_BUCKETS)
+        }
+    }
 }
 
 fn quantize_q16(weight: f64) -> i32 {
@@ -406,6 +425,61 @@ mod tests {
                 assert_eq!(q16_sum_to_bucket(t, n) as usize, i + 1, "N={n}");
             }
         }
+    }
+
+    /// 256 段階の進行度 (`k = 1..=255` の閾値 `round(ln(k / (256 - k)) * 65536)` を超えた
+    /// 個数) を求める独立した参照実装。
+    fn progress_0_to_255_reference(sum: i64) -> usize {
+        (1..256)
+            .filter(|&k| {
+                let p = k as f64 / 256.0;
+                let threshold = ((p / (1.0 - p)).ln() * 65536.0).round() as i64;
+                threshold <= sum
+            })
+            .count()
+    }
+
+    #[test]
+    fn q16_eight_buckets_equal_the_256_level_progress_scaled_down() {
+        // 8 bucket の境界は 256 段階の進行度を `progress * 8 / 256` で落とした境界と一致する。
+        // 全 256 段階の閾値 (`k = 1..=255`) の前後と、その中間の和で突き合わせる。
+        let mut sums = vec![i64::MIN, i64::MAX, 0];
+        for k in 1..256 {
+            let p = k as f64 / 256.0;
+            let threshold = ((p / (1.0 - p)).ln() * 65536.0).round() as i64;
+            sums.extend([threshold - 1, threshold, threshold + 1]);
+        }
+        for step in -400_000i64..=400_000 {
+            if step % 997 == 0 {
+                sums.push(step);
+            }
+        }
+        for sum in sums {
+            let want = progress_0_to_255_reference(sum) * 8 / 256;
+            assert_eq!(usize::from(q16_sum_to_bucket(sum, 8)), want, "sum {sum}");
+        }
+    }
+
+    #[test]
+    fn entering_king_bucket_takes_the_last_slot_only_for_mutual_entering_king() {
+        // 重みは未ロード (和 0) なので、相入玉でない局面は 8 bucket の中央 (4) に入る。
+        let p = ShogiProgressKPAbs;
+        let board = |black_rank: u8, white_rank: u8| ShogiBoard {
+            side_to_move: Color::Black,
+            black_king_sq: shogi_format::types::Square::new(4, black_rank),
+            white_king_sq: shogi_format::types::Square::new(4, white_rank),
+            ..Default::default()
+        };
+        // 平手初期配置の玉位置 (先手 9 段目、後手 1 段目)。
+        assert_eq!(p.bucket_q16_entering_king_board(&board(8, 0)), 4);
+        // 先手玉 5 段目・後手玉 5 段目。
+        assert_eq!(p.bucket_q16_entering_king_board(&board(4, 4)), 8);
+        // 先手玉 4 段目・後手玉 6 段目。
+        assert_eq!(p.bucket_q16_entering_king_board(&board(3, 5)), 8);
+        // 先手玉だけが 5 段目以内。
+        assert_eq!(p.bucket_q16_entering_king_board(&board(4, 3)), 4);
+        // 後手玉だけが 5 段目以降。
+        assert_eq!(p.bucket_q16_entering_king_board(&board(5, 4)), 4);
     }
 
     #[test]
