@@ -92,7 +92,7 @@ KingRank9 を使う場合は末尾を次のように置き換える:
 |---|---:|---|
 | `--superbatches` | 10 | 学習する superbatch 数。既定 10 は smoke 用、本番はもっと大きくする (下記「学習量の目安」) |
 | `--batch-size` | 16384 | 勾配更新 1 回あたりの局面数。GPU throughput と学習特性 (勾配のばらつき・更新回数) の両方に効く学習ハイパーパラメータ |
-| `--feature-set` | halfka-hm-merged | 入力 feature set。`halfkp` / `halfka-split` / `halfka-merged` / `halfka-hm-split` / `halfka-hm-merged` から選ぶ ([README](../README.ja.md) 参照) |
+| `--feature-set` | halfka-hm-merged | 入力 feature set。`halfkp` / `halfka-split` / `halfka-merged` / `halfka-hm-split` / `halfka-hm-merged` / `kp` から選ぶ ([README](../README.ja.md) 参照) |
 | `--keep-checkpoints` | 全保持 | raw `.ckpt` (weight + optimizer state) を直近 N 個に保つ。既定の全保持が学習失敗の追跡には無難。ただし `--save-rate 20` で 400 sb 学習すると `.ckpt` 20 本 × 約 1.8 GB (既定 LayerStack アーキ) ≈ 36 GB になるため、ストレージが逼迫する場合は制限する。量子化 `.bin` は常に全保持 |
 | `--win-rate-model` | OFF (layerstack) / 必須 (simple) | WRM (win-rate-model) loss。`net_output ≈ cp / --wrm-nnue2score` で収束する。`layerstack` では任意 (未指定なら plain sigmoid-MSE)。`simple` トレーナは必須で、`simple --fv-scale` 省略時は weight 読み込みの有無にかかわらず `--scale = --wrm-nnue2score` も必須。上の例は両方を 290 とし、`FV_SCALE=28` になる。loss の調整パラメータは [WRM loss のチューニング](wrm-loss-tuning.ja.md) を参照 |
 | `--fv-scale` (`simple`) | なし | export するアーキ文字列に書く正の整数の評価値スケール。明示値が常に最優先。省略時は v9 以降の `--resume` checkpoint、`--init-from` の入力 net、`round(127 × QB / --scale)` の導出値の順に解決し、weight 読み込みの有無にかかわらず `--scale = --wrm-nnue2score` が必須。v9 以降は再指定不要。v8 以前では override を再指定しないと導出値へ戻る |

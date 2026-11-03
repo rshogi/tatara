@@ -103,7 +103,7 @@ vector.
 
 ### Input feature set
 
-`--feature-set` selects one of five (default `halfka-hm-merged`). They differ in
+`--feature-set` selects one of six (default `halfka-hm-merged`). They differ in
 how the kings are included as features:
 
 | `--feature-set` | King handling |
@@ -113,6 +113,7 @@ how the kings are included as features:
 | `halfka-merged` | Kings are included; own-king and enemy-king features share one slot |
 | `halfka-hm-split` | `halfka-split` plus a left-right mirror so the king always sits on one side of the board, compressing king squares 81 → 45 |
 | `halfka-hm-merged` (default) | `halfka-merged` plus the same left-right mirror king-square compression |
+| `kp` | The king square does not select a weight block: pieces (kings excluded) and both kings are independent features, 1710 inputs in total. The `K+P` feature list that YaneuraOu's KP256 uses |
 
 The default `halfka-hm-merged` applies to shogi the same design as Stockfish's
 **HalfKAv2_hm** (left-right king-square mirroring + own-king/enemy-king features

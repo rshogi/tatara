@@ -94,7 +94,7 @@ v9 以降の checkpoint では再指定不要。v8 以前から resume する場
 
 ### 入力 feature set
 
-`--feature-set` で 5 種から選べる(既定 `halfka-hm-merged`)。玉をどう特徴に含めるかが違う:
+`--feature-set` で 6 種から選べる(既定 `halfka-hm-merged`)。玉をどう特徴に含めるかが違う:
 
 | `--feature-set` | 玉の扱い |
 |---|---|
@@ -103,6 +103,7 @@ v9 以降の checkpoint では再指定不要。v8 以前から resume する場
 | `halfka-merged` | 玉も含める。自玉と敵玉で特徴枠を 1 つに共有する |
 | `halfka-hm-split` | `halfka-split` に加え、玉が常に盤の片側へ来るよう左右反転し、玉マスを 81 → 45 に圧縮 |
 | `halfka-hm-merged`(既定) | `halfka-merged` + 同じ左右反転による玉マス圧縮 |
+| `kp` | 玉マスで重みブロックを切り替えない。駒(玉以外)と両玉のマスをそれぞれ独立した特徴にする(計 1710 入力)。YaneuraOu の KP256 が使う `K+P` の特徴リスト |
 
 既定の `halfka-hm-merged` は、Stockfish の **HalfKAv2_hm**(玉マスの左右反転 +
 自玉・敵玉の特徴枠を 1 つに共有)と同じ設計を将棋に適用したもの。

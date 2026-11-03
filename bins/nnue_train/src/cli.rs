@@ -240,7 +240,7 @@ pub(crate) struct Cli {
     pub(crate) net_id: String,
 
     /// Input feature set. One of: halfkp, halfka-split, halfka-merged,
-    /// halfka-hm-split, halfka-hm-merged. Determines the FT input dimension and
+    /// halfka-hm-split, halfka-hm-merged, kp. Determines the FT input dimension and
     /// the number of active features. The default halfka-hm-merged is
     /// king-symmetric merged HalfKA.
     #[arg(long, default_value = "halfka-hm-merged", global = true)]
