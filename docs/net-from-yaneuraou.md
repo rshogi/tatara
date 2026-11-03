@@ -9,7 +9,8 @@ cargo run --release -p net-from-yo -- \
   --input /path/to/yaneuraou/nn.bin \
   --output /path/to/tatara.bin \
   --assume-kingrank9   # progress kp abs の net は --assume-progresskpabs、
-                       # 相入玉 bucket 付きの net は --assume-progresskpabsq16ek
+                       # 相入玉 bucket 付きの net は --assume-progresskpabsq16ek、
+                       # 9 stack のうち 0〜7 だけを使う net は --assume-progresskpabsq16pad
 ```
 
 ## 対応する feature set と次元
@@ -39,17 +40,20 @@ LayerStack 数は末尾 token から決まり、`_k3k3` は 9、`_progress<N>` �
 - `LayerStack=<n>` が Network 名の末尾 token の示す数と食い違う、`_k3k3_progress<N>` の
   ような複合 token、hand / 玉位置 9x9 等の他の token
 - routing の主張と合わない (`--assume-kingrank9` に既定名 `SFNN-1536`(-V2) と `_k3k3` 以外、
-  `--assume-progresskpabs` に 10 以上の LayerStack、`--assume-progresskpabsq16ek` に 9 stack の
-  `_k3k3` 以外)
+  `--assume-progresskpabs` に 10 以上の LayerStack、`--assume-progresskpabsq16ek` と
+  `--assume-progresskpabsq16pad` に 9 stack の `_k3k3` 以外)
 - Network 名の FT 次元が Features の FT 次元と食い違う、baseline 名なのに
   `HalfKA_hm2`/1536 でない等、arch 内の不整合
 - FT 出力が 32 の倍数でない / 上限超過等、健全性ガード範囲外
 
 YaneuraOu の派生実装には、9 stack の `_k3k3` 名の評価ファイルを読み、先頭 N 枠を進行度で
 選んで使う build がある。このため Network 名だけでは routing を判別できず、
-`--assume-kingrank9`、`--assume-progresskpabs`、`--assume-progresskpabsq16ek` のうち 1 つの明示を必須にしている。
+`--assume-kingrank9`、`--assume-progresskpabs`、`--assume-progresskpabsq16ek`、
+`--assume-progresskpabsq16pad` のうち 1 つの明示を必須にしている。
 `--assume-progresskpabsq16ek` は 9 stack の `_k3k3` だけを受理する。YaneuraOu の
 `..._progress8ek` 用の評価関数がこの形で、bucket 8 を相入玉局面に使う。
+`--assume-progresskpabsq16pad` も 9 stack の `_k3k3` だけを受理する。配布されている
+`progress8kpabs` の評価関数がこの形で、進行度の 8 等分で stack 0〜7 を選び、stack 8 は使わない。
 `--assume-progresskpabs` では `_progress<N>`・token なし・9 stack の `_k3k3` を受理し、
 ファイルにある LayerStack 数のまま書き出す。進行度係数 (YaneuraOu では `nn.bin` と同じ
 directory の `progress.bin`) と、9 stack の `_k3k3` 名で書かれた net の元の progress bucket 数は
