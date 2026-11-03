@@ -27,6 +27,11 @@ pub enum YaneuraOuRouting {
     /// KP 絶対値の進行度を N 等分した bucket (`_PROGRESS<N>`、N=1 は suffix なし)。
     /// YaneuraOu は進行度係数を評価ファイルと同じ directory の `progress.bin` から読む。
     ProgressKpAbs,
+    /// 進行度を 8 等分した bucket 0..=7 と、相入玉局面専用の bucket 8 (tatara の
+    /// `progresskpabsq16ek`)。LayerStack は常に 9 で、Network 名は `_K3K3` になる。
+    /// YaneuraOu は進行度係数を `progress.bin` から読み、`LS_BUCKET_MODE` を
+    /// `progress8ek` にして初めて同じ bucket を選ぶ。
+    ProgressKpAbsQ16EnteringKing,
 }
 
 const MAX_FT_OUT: usize = 8192;
@@ -165,6 +170,11 @@ fn architecture(
                 "YaneuraOu SFNN requires {YANEURAOU_LAYER_STACKS} LayerStacks (KingRank9), but weights have {num_buckets} buckets"
             ));
         }
+        YaneuraOuRouting::ProgressKpAbsQ16EnteringKing if num_buckets != YANEURAOU_LAYER_STACKS => {
+            return invalid_input(format!(
+                "entering-king routing requires {YANEURAOU_LAYER_STACKS} LayerStacks, but weights have {num_buckets} buckets"
+            ));
+        }
         YaneuraOuRouting::ProgressKpAbs
             if num_buckets == 0 || num_buckets > MAX_PROGRESS_KPABS_BUCKETS =>
         {
@@ -195,7 +205,9 @@ fn arch_string(arch: &Architecture) -> String {
     // 生成器 (`nnue_arch_gen.py`) は layer stack token を `_` で連結し、bucket が 1 つの
     // ときは token を付けない。`SFNN-1536` は KingRank9 の既定構造に限る。
     let layer_stack_token = match arch.routing {
-        YaneuraOuRouting::KingRank9 => "_k3k3".to_string(),
+        YaneuraOuRouting::KingRank9 | YaneuraOuRouting::ProgressKpAbsQ16EnteringKing => {
+            "_k3k3".to_string()
+        }
         YaneuraOuRouting::ProgressKpAbs if arch.num_buckets == 1 => String::new(),
         YaneuraOuRouting::ProgressKpAbs => format!("_progress{}", arch.num_buckets),
     };
@@ -419,6 +431,85 @@ mod tests {
         let weights = LayerStackWeights::zeroed(FeatureSet::HalfKaHmMerged.spec(), 128, 16, 32, 8);
         let error = save_yaneuraou(&mut Vec::new(), &weights).unwrap_err();
         assert!(error.to_string().contains("KingRank9"), "{error}");
+    }
+
+    #[test]
+    fn entering_king_architecture_names_use_the_k3k3_token() {
+        let cases = [
+            (
+                1024,
+                16,
+                64,
+                "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->1024x2],Network=SFNN_HALFKAHM2_1024_15_64_K3K3{LayerStack=9}",
+            ),
+            (
+                2304,
+                16,
+                64,
+                "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->2304x2],Network=SFNN_HALFKAHM2_2304_15_64_K3K3{LayerStack=9}",
+            ),
+            // 既定名 `SFNN-1536` は KingRank9 の構造を指すので、同じ寸法でも使わない。
+            (
+                1536,
+                16,
+                32,
+                "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->1536x2],Network=SFNN_HALFKAHM2_1536_15_32_K3K3{LayerStack=9}",
+            ),
+        ];
+        for (ft_out, l1_out, l2_out, expected) in cases {
+            let weights = LayerStackWeights::zeroed(
+                FeatureSet::HalfKaHmMerged.spec(),
+                ft_out,
+                l1_out,
+                l2_out,
+                YANEURAOU_LAYER_STACKS,
+            );
+            let arch =
+                architecture(&weights, YaneuraOuRouting::ProgressKpAbsQ16EnteringKing).unwrap();
+            assert_eq!(arch_string(&arch), expected);
+        }
+    }
+
+    #[test]
+    fn entering_king_requires_nine_layer_stacks() {
+        for buckets in [1, 8, 10] {
+            let weights =
+                LayerStackWeights::zeroed(FeatureSet::HalfKaHmMerged.spec(), 128, 16, 32, buckets);
+            let error = save_yaneuraou_with_routing(
+                &mut Vec::new(),
+                &weights,
+                YaneuraOuRouting::ProgressKpAbsQ16EnteringKing,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("entering-king"), "{error}");
+        }
+    }
+
+    #[test]
+    fn entering_king_export_matches_kingrank9_export_for_the_generated_name() {
+        // 重みの並びは routing に依らない。生成名が同じ寸法 (1536-16-32 以外) では
+        // 2 つの routing の出力が byte 一致する。
+        let mut weights = LayerStackWeights::zeroed(
+            FeatureSet::HalfKaHmMerged.spec(),
+            128,
+            4,
+            3,
+            YANEURAOU_LAYER_STACKS,
+        );
+        weights.ft_w[17] = -0.5;
+        weights.l1_w[31] = -0.25;
+        weights.l2_w[9] = -0.75;
+        weights.l3_w[5] = -0.125;
+        let mut kingrank9 = Vec::new();
+        save_yaneuraou_with_routing(&mut kingrank9, &weights, YaneuraOuRouting::KingRank9).unwrap();
+        let mut entering_king = Vec::new();
+        save_yaneuraou_with_routing(
+            &mut entering_king,
+            &weights,
+            YaneuraOuRouting::ProgressKpAbsQ16EnteringKing,
+        )
+        .unwrap();
+        assert_eq!(kingrank9, entering_king);
     }
 
     #[test]

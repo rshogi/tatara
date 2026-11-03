@@ -15,7 +15,8 @@ flag は下の「bucket routing」節を参照。
 cargo run --release -p net-to-yo -- \
   --input /path/to/tatara.bin \
   --output /path/to/eval/nn.bin \
-  --assume-kingrank9   # progresskpabs で学習した net は --assume-progresskpabs
+  --assume-kingrank9   # progresskpabs で学習した net は --assume-progresskpabs、
+                       # progresskpabsq16ek で学習した net は --assume-progresskpabsq16ek
 ```
 
 ## `nnue-train` から直接出力
@@ -34,10 +35,11 @@ cargo run --release -p nnue-trainer -- \
 ```
 
 `--output-format` の既定値は `tatara`。`yaneuraou` は plain LayerStack と KingRank9 の
-組合せだけを受理し、`progresskpabs`、`progresskpabsq16`、Simple、PSQT、Threat、EffectBucket は明示的に
-エラーにする。学習 config から bucket routing mode を判定できるため、この経路では
+組合せだけを受理し、`progresskpabs`、`progresskpabsq16`、`progresskpabsq16ek`、Simple、PSQT、Threat、
+EffectBucket は明示的にエラーにする。学習 config から bucket routing mode を判定できるため、この経路では
 `--assume-kingrank9` は不要。`progresskpabs` で学習した net は tatara `.bin` で出力し、
-`net_to_yo --assume-progresskpabs` で変換する。
+`net_to_yo --assume-progresskpabs` で変換する。`progresskpabsq16ek` で学習した net も同様に
+tatara `.bin` で出力し、`net_to_yo --assume-progresskpabsq16ek` で変換する。
 
 ## `net_from_yo` — YaneuraOu → tatara
 
@@ -49,7 +51,8 @@ quantised LayerStack `.bin` へ変換する。他の学習器が YaneuraOu 形�
 cargo run --release -p net-from-yo -- \
   --input /path/to/eval/nn.bin \
   --output /path/to/tatara.bin \
-  --assume-kingrank9   # progress kp abs の net は --assume-progresskpabs
+  --assume-kingrank9   # progress kp abs の net は --assume-progresskpabs、
+                       # 相入玉 bucket 付きの net は --assume-progresskpabsq16ek
 ```
 
 feature set と次元は入力の `arch_str` (`ModelType=SFNNWithoutPsqt;Features=<name>…`)
@@ -67,12 +70,13 @@ dense weight の 32 境界 padding 列は復元時に除去する。`net_to_yo` 
 ## bucket routing
 
 量子化 `.bin` も YaneuraOu SFNN ファイルも bucket の選択規則を完全には自己記述しないため、
-変換時は学習時の `--bucket-mode` に合わせて次のどちらか一方を必ず指定する。
+変換時は学習時の `--bucket-mode` に合わせて次のいずれか 1 つを必ず指定する。
 
 | 学習時の `--bucket-mode` | flag | YaneuraOu の Network 名 | LayerStack 数 |
 |---|---|---|---|
 | `kingrank9` | `--assume-kingrank9` | `SFNN-1536` / `SFNN_<key>_<ft>_<h1>_<h2>_K3K3` | 9 |
 | `progresskpabs` | `--assume-progresskpabs` | `SFNN_<key>_<ft>_<h1>_<h2>_PROGRESS<N>` (N=1 は suffix なし) | N (1〜9) |
+| `progresskpabsq16ek` | `--assume-progresskpabsq16ek` | `SFNN_<key>_<ft>_<h1>_<h2>_K3K3` | 9 |
 
 progress kp abs の評価ファイルを YaneuraOu で使うときは、学習に使った進行度係数
 (`progress.bin`、[進行度係数の用意](progress-bin.md)) を `nn.bin` と同じ directory に置き、
@@ -83,6 +87,36 @@ progress kp abs の評価ファイルを YaneuraOu で使うときは、学習�
 進行度の計算方法 (f32 か、係数と閾値を 65536 倍した整数か) は YaneuraOu の build によって
 異なり、整数で計算する build では bucket 境界ちょうど付近の局面で tatara の f32 計算と
 選ぶ bucket が異なり得る。
+
+### 相入玉 bucket (`progresskpabsq16ek`)
+
+`progresskpabsq16ek` で学習した net は、進行度を 8 等分した bucket 0〜7 と、相入玉局面専用の
+bucket 8 を合わせた 9 stack を持つ。Network 名は配布されている `..._progress8ek` 用の評価関数と同じ
+`SFNN_<key>_<ft>_<h1>_<h2>_K3K3` になり、`nn.bin` は進行度の section を持たない (進行度係数は
+`progress.bin` を別に渡す)。`_K3K3` は名前の上の区別でしかなく、bucket の選び方を決めるのは
+エンジンのオプションである。
+
+YaneuraOu で同じ bucket を選ばせるには、次の 3 つを揃える。
+
+- `YANEURAOU_ENGINE_SFNN_<key>_<ft>_<h1>_<h2>_progress8ek` で build する (例:
+  `YANEURAOU_ENGINE_SFNN_halfkahm2_1024_15_64_progress8ek`)。
+- オプション `LS_BUCKET_MODE` を `progress8ek` にする。既定の `progress8kpabs` は相入玉を取り分けず、
+  bucket 8 を使わない。どちらのモードも評価関数の hash 検査を通るため、取り違えても警告が出ずに
+  別の stack が選ばれる。
+- 学習に使った `progress.bin` を渡す。オプション `LS_PROGRESS_COEFF` に名前を指定すると `EvalDir`
+  からの相対で解決され (未指定のときは `progress.bin`)、`/` を含む指定はそのまま path として使う。
+
+bucket の規則は次のとおり (YaneuraOu の段は 1 段目を 0 とする)。
+
+- 先手玉の段が 5 段目以内 (1〜5 段目) かつ後手玉の段が 5 段目以降 (5〜9 段目) なら bucket 8。ちょうど
+  5 段目の玉も含み、片方の玉だけが進んだ局面は含まない。
+- それ以外は、係数と閾値を 65536 倍した整数で進行度 (0〜255) を求め、`進行度 * 8 / 256` を bucket
+  にする。tatara の `progresskpabsq16` で `--num-buckets 8` を指定したときの bucket と一致する。
+
+変換した評価関数ファイルは Network 名が `_K3K3` なので、`kingrank9` の net と見分けが付かない。
+取り違えを避けるため、評価関数と同じ directory に `eval_options.txt` を置き、`LS_BUCKET_MODE progress8ek`
+と書いておく。YaneuraOu は `isready` で `EvalDir` の `eval_options.txt` を読み、そこに書かれたオプションを
+設定する。
 
 `_progress<N>` build は N stack だけを読み、残りがあるファイルはロードに失敗する。一方、
 YaneuraOu の派生実装には、9 stack の `_K3K3` 名の評価ファイルを読み、先頭 N 枠を進行度で
@@ -108,7 +142,7 @@ Apery-BonaPiece index 規約で恒等一致するため、重みを並べ替え�
 
 FT 出力次元 (`ft_out`)・L1 出力 (`l1_out`)・L2 出力 (`l2_out`) は任意で、YaneuraOu 側
 は対応するアーキで build する (`YANEURAOU_ENGINE_SFNN_<key>_<ft_out>_<l1_out-1>_<l2_out>_k3k3`、
-progress kp abs は末尾が `_progress<N>`)。KingRank9 の `HalfKaHmMerged` 1536-16-32 だけは
+progress kp abs は末尾が `_progress<N>`、相入玉 bucket 付きは `_progress8ek`)。KingRank9 の `HalfKaHmMerged` 1536-16-32 だけは
 YaneuraOu の既定 `SFNN-1536` 構造名を出力し、それ以外は生成器と同じ名前を大文字で出力する。
 
 ## 変換できない入力
@@ -116,7 +150,8 @@ YaneuraOu の既定 `SFNN-1536` 構造名を出力し、それ以外は生成器
 YaneuraOu SFNN に受け皿が無いため、次を含む `.bin` は明示的にエラーにする。
 
 - PSQT / Threat / EffectBucket block を持つ net (`arch_str` に該当トークンがある)
-- routing と合わない bucket 数 (`--assume-kingrank9` は 9、`--assume-progresskpabs` は 1〜9)
+- routing と合わない bucket 数 (`--assume-kingrank9` と `--assume-progresskpabsq16ek` は 9、
+  `--assume-progresskpabs` は 1〜9)
 
 前提として、YaneuraOu 側は `DISTINGUISH_GOLDS` 無効 (既定) で build する。有効
 build は成駒を別 plane に置き feature 次元が変わるため index が一致しない。

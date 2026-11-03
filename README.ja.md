@@ -100,7 +100,7 @@ v9 以降の checkpoint では再指定不要。v8 以前から resume する場
 
 | アーキ | サブコマンド | 構造 |
 |---|---|---|
-| **LayerStack** | `layerstack` | 局面の進行度で出力層を bucket 別に専用化(`--num-buckets`、既定 9。Stockfish の "LayerStacks" と同じ発想)。FT 出力 `--ft-out`(既定 1536)→ `--l1`(既定 16)→ `--l2`(既定 32)|
+| **LayerStack** | `layerstack` | 局面の進行度で出力層を bucket 別に専用化(`--num-buckets`、既定 9。Stockfish の "LayerStacks" と同じ発想)。`--bucket-mode progresskpabsq16ek` は双方の玉が盤の中段まで進んだ局面を 9 つ目の bucket に分ける。FT 出力 `--ft-out`(既定 1536)→ `--l1`(既定 16)→ `--l2`(既定 32)|
 | **Simple** | `simple` | bucket 分割のない素の NNUE(FT → 隠れ 2 層 → 単一出力)。層次元は `--arch <l1>x2-<l2>-<l3>` で指定(`l1` = FT 出力、`l2`/`l3` = 隠れ層、既定 `256x2-32-32`)、活性化 crelu / screlu / pairwise |
 
 ### 入力 feature set
@@ -138,6 +138,21 @@ file 構造で書き出すので、表の edition でビルドしたエンジン
 | `halfkp_256x2_32_32` | `halfkp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE` |
 | `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
 | `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
+
+`layerstack` のネットワークも 2 つ、NAGISA の評価関数ファイルと同じ file 構造で書き出せる。
+局面を 9 個の stack に振り分け、両玉が盤の中央まで入った局面は bucket 8、それ以外は
+進行度で bucket 0〜7 になる。進行度には、学習に使った `progress.bin` が要る。
+
+| ネットワーク | `layerstack` の option | YaneuraOu の `YANEURAOU_EDITION` |
+|---|---|---|
+| `halfkahm2_1024_15_64_progress8ek` | `--feature-set halfka-hm-merged --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin> --ft-out 1024 --l1 16 --l2 64` | `YANEURAOU_ENGINE_SFNN_halfkahm2_1024_15_64_progress8ek` |
+| `halfkahm2_2304_15_64_progress8ek` | 上の `--ft-out` を 2304 にする | `YANEURAOU_ENGINE_SFNN_halfkahm2_2304_15_64_progress8ek` |
+
+`nnue-train` が書く `.bin` は `net_to_yo --assume-progresskpabsq16ek` で変換する
+([詳細](docs/net-to-yaneuraou.md))。変換後のファイルの Network 名は KingRank9 の net と
+同じ `_K3K3` で終わるので、どの bucket 規則かはエンジンに教える必要がある。評価関数の
+directory に `nn.bin` と `progress.bin` を置き、`eval_options.txt` に `LS_BUCKET_MODE progress8ek`
+と書く。既定の `progress8kpabs` のままだと、エンジンは警告なしに読み込み、別の stack を選ぶ。
 
 ネットワーク名は [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) フォークの
 命名 (`NNUE_<feature>_<FT>x2_<H1>_<H2>`、同フォークの
@@ -281,7 +296,7 @@ YaneuraOu にそのまま読める。出力の scale は file ではなく Yaneu
 | **PSV** | PackedSfenValue — bullet-shogi 由来の学習データ format (1 局面 + score + WDL) |
 | **HCPE** | HuffmanCodedPosAndEval — Apery / dlshogi の 38-byte 局面・score・指し手・対局結果 format |
 | **KP / KP-abs** | King-Piece relative feature と絶対値版 (progress / 入玉判定用) |
-| **Q16** | 65536 倍 (小数部 16 bit) の固定小数点。`--bucket-mode progresskpabsq16` は progress 係数と bucket 閾値をこの形で量子化する |
+| **Q16** | 65536 倍 (小数部 16 bit) の固定小数点。`--bucket-mode progresskpabsq16` と `progresskpabsq16ek` は progress 係数と bucket 閾値をこの形で量子化する |
 | **bucket** | per-output-bucket 重み分離 (game phase / progress で分岐) |
 | **PSQT** | Piece-Square Table — 駒種×マスごとの線形評価テーブル。LayerStack の `--psqt` で per-bucket PSQT 出力を network 出力に加算し、dense 経路は非マテリアル構造の学習に専念できる |
 | **CReLU / SCReLU / Pairwise** | NNUE の活性化関数。CReLU = Clipped ReLU、SCReLU = Squared Clipped ReLU、Pairwise = 前半と後半の要素積で入力次元を半減。`simple` アーキの `--activation` で選択 |

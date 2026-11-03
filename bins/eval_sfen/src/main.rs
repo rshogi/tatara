@@ -9,8 +9,8 @@ use nnue_format::layerstack_weights::{
 };
 use nnue_train::dataloader::BucketMode;
 use shogi_features::{
-    EffectBucketConfig, FeatureSet, FeatureSetSpec, KINGRANK9_NUM_BUCKETS, ShogiProgressKPAbs,
-    ThreatProfile,
+    ENTERING_KING_NUM_BUCKETS, EffectBucketConfig, FeatureSet, FeatureSetSpec,
+    KINGRANK9_NUM_BUCKETS, ShogiProgressKPAbs, ThreatProfile,
 };
 use shogi_format::ShogiBoard;
 use shogi_format::types::{Color, Hand, Piece, PieceType, Square};
@@ -25,12 +25,12 @@ struct Args {
     nnue_file: PathBuf,
 
     /// Bucket assignment used when the net was trained: progresskpabs,
-    /// progresskpabsq16 or kingrank9. The deprecated spelling progress8kpabs is
-    /// accepted as an alias of progresskpabs.
+    /// progresskpabsq16, progresskpabsq16ek or kingrank9. The deprecated spelling
+    /// progress8kpabs is accepted as an alias of progresskpabs.
     #[arg(long, default_value = "progresskpabs")]
     bucket_mode: String,
 
-    /// Progress coefficient file. Required in progresskpabs / progresskpabsq16 mode and unused in kingrank9 mode.
+    /// Progress coefficient file. Required in progresskpabs / progresskpabsq16 / progresskpabsq16ek mode and unused in kingrank9 mode.
     #[arg(long)]
     progress_coeff: Option<PathBuf>,
 
@@ -49,6 +49,7 @@ struct Args {
 /// file の path を返す。
 ///
 /// - progresskpabs / progresskpabsq16: `--progress-coeff` 必須 (指定 path を `Some` で返す)。
+/// - progresskpabsq16ek: `--progress-coeff` 必須で、net の格納 bucket 数は 9 のみ。
 /// - kingrank9: net の格納 bucket 数は 9 のみ、`--progress-coeff` は不可。
 fn validate_mode_args(
     mode: BucketMode,
@@ -64,6 +65,22 @@ fn validate_mode_args(
                 )
             })
             .map(Some),
+        BucketMode::ProgressKpAbsQ16EnteringKing => {
+            if stored_num_buckets != ENTERING_KING_NUM_BUCKETS {
+                return Err(format!(
+                    "--bucket-mode {} requires a {ENTERING_KING_NUM_BUCKETS}-bucket net (file has {stored_num_buckets})",
+                    mode.canonical_name()
+                ));
+            }
+            progress_coeff
+                .ok_or_else(|| {
+                    format!(
+                        "--progress-coeff is required with --bucket-mode {}",
+                        mode.canonical_name()
+                    )
+                })
+                .map(Some)
+        }
         BucketMode::KingRank9 => {
             if stored_num_buckets != KINGRANK9_NUM_BUCKETS {
                 return Err(format!(
@@ -705,6 +722,18 @@ mod tests {
         assert_eq!(path, coeff);
         let err = validate_mode_args(BucketMode::ProgressKpAbsQ16, None, 8).unwrap_err();
         assert!(err.contains("progresskpabsq16"), "{err}");
+
+        // progresskpabsq16ek: coeff 必須かつ格納 9 bucket のみ。
+        let path = validate_mode_args(BucketMode::ProgressKpAbsQ16EnteringKing, Some(coeff), 9)
+            .expect("coeff supplied")
+            .expect("progresskpabsq16ek returns the coeff path");
+        assert_eq!(path, coeff);
+        let err =
+            validate_mode_args(BucketMode::ProgressKpAbsQ16EnteringKing, None, 9).unwrap_err();
+        assert!(err.contains("--progress-coeff is required"), "{err}");
+        let err = validate_mode_args(BucketMode::ProgressKpAbsQ16EnteringKing, Some(coeff), 8)
+            .unwrap_err();
+        assert!(err.contains("requires a 9-bucket net"), "{err}");
 
         // kingrank9: 格納 9 bucket のみ、coeff 不可。
         assert!(matches!(

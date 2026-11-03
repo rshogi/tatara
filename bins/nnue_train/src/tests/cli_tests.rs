@@ -1203,6 +1203,12 @@ fn yaneuraou_output_format_parses_and_simple_rejects_it() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("--bucket-mode kingrank9"));
+    let error = validate_output_format(
+        OutputFormatArg::Yaneuraou,
+        nnue_train::dataloader::BucketMode::ProgressKpAbsQ16EnteringKing,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("net_to_yo"), "{error}");
 }
 
 fn layerstack_args(argv: &[&str]) -> LayerstackArgs {
@@ -1280,6 +1286,49 @@ fn progresskpabsq16_bucket_mode_shares_progress_bucket_range() {
     let too_few = layerstack_args(&["--bucket-mode", "progresskpabsq16", "--num-buckets", "1"]);
     let err = validate_bucket_mode(&too_few).unwrap_err().to_string();
     assert!(err.contains("for progresskpabsq16"), "{err}");
+}
+
+#[test]
+fn progresskpabsq16ek_bucket_mode_validation() {
+    // 既定の --num-buckets (9) のまま受理される。
+    let valid = layerstack_args(&["--bucket-mode", "progresskpabsq16ek"]);
+    assert!(matches!(
+        validate_bucket_mode(&valid),
+        Ok(nnue_train::dataloader::BucketMode::ProgressKpAbsQ16EnteringKing)
+    ));
+    let explicit = layerstack_args(&[
+        "--bucket-mode",
+        "progresskpabsq16ek",
+        "--num-buckets",
+        "9",
+        "--progress-coeff",
+        "progress.bin",
+    ]);
+    assert!(validate_bucket_mode(&explicit).is_ok());
+
+    // bucket 数は 9 固定。
+    for count in ["1", "2", "8"] {
+        let wrong = layerstack_args(&[
+            "--bucket-mode",
+            "progresskpabsq16ek",
+            "--num-buckets",
+            count,
+        ]);
+        let err = validate_bucket_mode(&wrong).unwrap_err().to_string();
+        assert!(err.contains("must be 9"), "{err}");
+        assert!(err.contains("progresskpabsq16ek"), "{err}");
+    }
+
+    // ほかの mode の綴りとは別の mode で、取り違えても通らない。
+    use nnue_train::dataloader::BucketMode;
+    for other in ["progresskpabs", "progresskpabsq16", "kingrank9"] {
+        let args = layerstack_args(&["--bucket-mode", other]);
+        let mode = validate_bucket_mode(&args).expect("other modes accept the default count");
+        assert_ne!(
+            mode.canonical_name(),
+            BucketMode::ProgressKpAbsQ16EnteringKing.canonical_name()
+        );
+    }
 }
 
 #[test]

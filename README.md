@@ -110,7 +110,7 @@ vector.
 
 | Architecture | Subcommand | Structure |
 |---|---|---|
-| **LayerStack** | `layerstack` | Specializes the output layer per position bucket. `--bucket-mode progresskpabs` uses progress coefficients and 2–9 buckets (`progresskpabsq16` is the same routing with integer Q16 arithmetic); `--bucket-mode kingrank9` uses YaneuraOu KingRank9 with exactly 9 buckets and no progress coefficients. FT output `--ft-out` (default 1536) → `--l1` (default 16) → `--l2` (default 32) |
+| **LayerStack** | `layerstack` | Specializes the output layer per position bucket. `--bucket-mode progresskpabs` uses progress coefficients and 2–9 buckets (`progresskpabsq16` is the same routing with integer Q16 arithmetic; `progresskpabsq16ek` adds a ninth bucket for positions where both kings have entered the middle of the board); `--bucket-mode kingrank9` uses YaneuraOu KingRank9 with exactly 9 buckets and no progress coefficients. FT output `--ft-out` (default 1536) → `--l1` (default 16) → `--l2` (default 32) |
 | **Simple** | `simple` | A plain NNUE with no bucket split (FT → 2 hidden layers → single output). Layer dimensions are set with `--arch <l1>x2-<l2>-<l3>` (`l1` = FT output, `l2`/`l3` = hidden layers; default `256x2-32-32`); activation crelu / screlu / pairwise |
 
 ### Input feature set
@@ -151,6 +151,24 @@ use the default `--activation crelu`.
 | `halfkp_256x2_32_32` | `halfkp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE` |
 | `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
 | `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
+
+Two `layerstack` networks are also written in the file layout of the NAGISA
+evaluation files. They route each position to one of 9 stacks: bucket 8 for
+positions where both kings have entered the middle of the board, buckets 0–7
+by game progress, which needs the `progress.bin` that was used in training.
+
+| Network | `layerstack` options | YaneuraOu `YANEURAOU_EDITION` |
+|---|---|---|
+| `halfkahm2_1024_15_64_progress8ek` | `--feature-set halfka-hm-merged --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin> --ft-out 1024 --l1 16 --l2 64` | `YANEURAOU_ENGINE_SFNN_halfkahm2_1024_15_64_progress8ek` |
+| `halfkahm2_2304_15_64_progress8ek` | the same with `--ft-out 2304` | `YANEURAOU_ENGINE_SFNN_halfkahm2_2304_15_64_progress8ek` |
+
+The `.bin` that `nnue-train` writes for these is converted with
+`net_to_yo --assume-progresskpabsq16ek` ([details](docs/net-to-yaneuraou.md)). The
+converted file's network name ends in `_K3K3`, the same as a KingRank9 net, so the
+engine must be told which bucket rule applies: put `LS_BUCKET_MODE progress8ek` and the
+`progress.bin` next to `nn.bin` in the evaluation directory (`eval_options.txt`). With
+the default `progress8kpabs` the engine loads the file without a warning and picks
+different stacks.
 
 The names follow the network naming of the
 [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) fork
@@ -316,7 +334,7 @@ own net, see the [setup guide](docs/setup.md).
 | **DL** | Deep learning — the model-derived score label stored alongside the base search score in a dual-label PSV |
 | **HCPE** | HuffmanCodedPosAndEval — the 38-byte Apery / dlshogi position, score, move, and game-result format |
 | **KP / KP-abs** | King-Piece relative feature and its absolute-value variant (for progress / entering-king detection) |
-| **Q16** | Fixed-point values scaled by 65536 (16 fractional bits). `--bucket-mode progresskpabsq16` quantises the progress coefficients and bucket thresholds this way |
+| **Q16** | Fixed-point values scaled by 65536 (16 fractional bits). `--bucket-mode progresskpabsq16` and `progresskpabsq16ek` quantise the progress coefficients and bucket thresholds this way |
 | **bucket** | Per-output-bucket weight separation (branching by game phase / progress) |
 | **PSQT** | Piece-Square Table — a linear per-piece-per-square evaluation table. The LayerStack `--psqt` option adds a per-bucket PSQT output to the network output so the dense path only has to learn non-material structure |
 | **EffectBucket** | Feature-set extension that maps each base feature row to `base_index * NB + effect_bucket`, where `EffectBucket=<config>` in the arch string records the bucket count and whether king features are bucketed |

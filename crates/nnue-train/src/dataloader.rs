@@ -30,7 +30,7 @@ use std::thread;
 use std::time::Duration;
 
 use shogi_features::progress_kpabs::ShogiProgressKPAbs;
-use shogi_features::{FeatureSetSpec, kingrank9_bucket_board};
+use shogi_features::{ENTERING_KING_NUM_BUCKETS, FeatureSetSpec, kingrank9_bucket_board};
 use shogi_format::{HCPE_RECORD_BYTES, HuffmanCodedPosAndEval, PackedSfenValue, ShogiBoard};
 
 /// PSV record size in bytes (`shogi_format::PackedSfenValue` is a fixed
@@ -307,6 +307,10 @@ pub enum BucketMode {
     /// [`Self::ProgressKpAbs`] と同じ係数・同じ等分を、Q16 整数の logit 和と整数閾値で
     /// 判定する。境界のごく近くの局面だけ f32 版と bucket が変わる。
     ProgressKpAbsQ16,
+    /// 相入玉 (先手玉が 5 段目以内かつ後手玉が 5 段目以降) の局面を最後の bucket 8 に入れ、
+    /// それ以外は [`Self::ProgressKpAbsQ16`] で進行度を 8 等分した bucket 0..=7 に入れる。
+    /// bucket 数は 9 固定。
+    ProgressKpAbsQ16EnteringKing,
     /// 双方の玉段を手番視点に正規化した固定 9 bucket を使う。
     KingRank9,
 }
@@ -323,23 +327,28 @@ impl BucketMode {
         match self {
             Self::ProgressKpAbs => "progresskpabs",
             Self::ProgressKpAbsQ16 => "progresskpabsq16",
+            Self::ProgressKpAbsQ16EnteringKing => "progresskpabsq16ek",
             Self::KingRank9 => "kingrank9",
         }
     }
 
     /// progress 係数ファイル (`--progress-coeff`) で bucket を決める mode か。
     pub const fn uses_progress_coeff(self) -> bool {
-        matches!(self, Self::ProgressKpAbs | Self::ProgressKpAbsQ16)
+        matches!(
+            self,
+            Self::ProgressKpAbs | Self::ProgressKpAbsQ16 | Self::ProgressKpAbsQ16EnteringKing
+        )
     }
 
-    /// bucket mode 名をパースする。canonical 名 (`progresskpabs` / `progresskpabsq16` / `kingrank9`)
-    /// に加え、[`Self::LEGACY_PROGRESS_KPABS_NAME`] も受理する。返り値の bool は
-    /// legacy alias 経由で一致したかで、CLI 入力の呼び出し元が非推奨警告を出す
-    /// 判断に使う (checkpoint header の読み戻しでは警告不要なので無視する)。
+    /// bucket mode 名をパースする。canonical 名 (`progresskpabs` / `progresskpabsq16` /
+    /// `progresskpabsq16ek` / `kingrank9`) に加え、[`Self::LEGACY_PROGRESS_KPABS_NAME`]
+    /// も受理する。返り値の bool は legacy alias 経由で一致したかで、CLI 入力の
+    /// 呼び出し元が非推奨警告を出す判断に使う (checkpoint header の読み戻しでは警告不要なので無視する)。
     pub fn parse(name: &str) -> Option<(Self, bool)> {
         match name {
             "progresskpabs" => Some((Self::ProgressKpAbs, false)),
             "progresskpabsq16" => Some((Self::ProgressKpAbsQ16, false)),
+            "progresskpabsq16ek" => Some((Self::ProgressKpAbsQ16EnteringKing, false)),
             Self::LEGACY_PROGRESS_KPABS_NAME => Some((Self::ProgressKpAbs, true)),
             "kingrank9" => Some((Self::KingRank9, false)),
             _ => None,
@@ -362,7 +371,7 @@ impl BucketMode {
             }
             Some((mode, false)) => Ok((mode, None)),
             None => Err(format!(
-                "--bucket-mode '{name}' is unknown (expected 'progresskpabs', 'progresskpabsq16' or 'kingrank9')"
+                "--bucket-mode '{name}' is unknown (expected 'progresskpabs', 'progresskpabsq16', 'progresskpabsq16ek' or 'kingrank9')"
             )),
         }
     }
@@ -373,6 +382,10 @@ impl BucketMode {
         match self {
             Self::ProgressKpAbs => ShogiProgressKPAbs.bucket_board(board, num_buckets),
             Self::ProgressKpAbsQ16 => ShogiProgressKPAbs.bucket_q16_board(board, num_buckets),
+            Self::ProgressKpAbsQ16EnteringKing => {
+                debug_assert_eq!(num_buckets, ENTERING_KING_NUM_BUCKETS);
+                ShogiProgressKPAbs.bucket_q16_entering_king_board(board)
+            }
             Self::KingRank9 => kingrank9_bucket_board(board),
         }
     }
@@ -1271,9 +1284,10 @@ impl BucketedPrefetchedLoader {
     /// 出ない)。`score_drop_abs` が `Some(t)` なら `|score| >= t` を skip。
     /// `score_clamp_abs` が `Some(c)` なら drop を生き残った position の score を
     /// `[-c, c]` に飽和させる (`--score-clamp-abs`)。
-    /// `bucket_mode` は output bucket の算出方式。`ProgressKpAbs` / `ProgressKpAbsQ16` の重みは
-    /// process-global なので呼び出し前に `ShogiProgressKPAbs::load_from_bin` 済で
-    /// あること、未ロードなら全 bucket 4。`KingRank9` は外部重みを参照しない。
+    /// `bucket_mode` は output bucket の算出方式。`ProgressKpAbs` / `ProgressKpAbsQ16` /
+    /// `ProgressKpAbsQ16EnteringKing` の重みは process-global なので呼び出し前に
+    /// `ShogiProgressKPAbs::load_from_bin` 済であること、未ロードなら全 bucket 4
+    /// (`ProgressKpAbsQ16EnteringKing` は相入玉でない局面だけ)。`KingRank9` は外部重みを参照しない。
     /// `feature_set` は sparse index 化に使う feature set spec で、全 worker が共有する。
     /// `num_buckets` は progress mode の bucket 数。`compute_bucket = false` (Simple アーキ) では bucket
     /// 計算自体が skip されるが、worker 側 assertion (`num_buckets >= 1`) は常に
@@ -1682,6 +1696,10 @@ mod tests {
             BucketMode::parse("progresskpabsq16"),
             Some((BucketMode::ProgressKpAbsQ16, false))
         ));
+        assert!(matches!(
+            BucketMode::parse("progresskpabsq16ek"),
+            Some((BucketMode::ProgressKpAbsQ16EnteringKing, false))
+        ));
         // 非推奨 alias は legacy flag 付きで受理。
         assert!(matches!(
             BucketMode::parse(BucketMode::LEGACY_PROGRESS_KPABS_NAME),
@@ -1693,6 +1711,7 @@ mod tests {
         for mode in [
             BucketMode::ProgressKpAbs,
             BucketMode::ProgressKpAbsQ16,
+            BucketMode::ProgressKpAbsQ16EnteringKing,
             BucketMode::KingRank9,
         ] {
             let (parsed, legacy) = BucketMode::parse(mode.canonical_name()).unwrap();
@@ -1707,6 +1726,7 @@ mod tests {
         for mode in [
             BucketMode::ProgressKpAbs,
             BucketMode::ProgressKpAbsQ16,
+            BucketMode::ProgressKpAbsQ16EnteringKing,
             BucketMode::KingRank9,
         ] {
             let (parsed, warning) = BucketMode::parse_cli(mode.canonical_name()).unwrap();
@@ -1734,7 +1754,36 @@ mod tests {
         assert!(err.contains("unknown"), "{err}");
         assert!(err.contains("'progresskpabs'"), "{err}");
         assert!(err.contains("progresskpabsq16"), "{err}");
+        assert!(err.contains("progresskpabsq16ek"), "{err}");
         assert!(err.contains("kingrank9"), "{err}");
+    }
+
+    #[test]
+    fn bucket_mode_progress_coeff_usage() {
+        for mode in [
+            BucketMode::ProgressKpAbs,
+            BucketMode::ProgressKpAbsQ16,
+            BucketMode::ProgressKpAbsQ16EnteringKing,
+        ] {
+            assert!(mode.uses_progress_coeff(), "{}", mode.canonical_name());
+        }
+        assert!(!BucketMode::KingRank9.uses_progress_coeff());
+    }
+
+    #[test]
+    fn entering_king_bucket_mode_routes_by_king_ranks() {
+        // 重みは未ロードなので、相入玉でない局面は 8 bucket の中央 (4) になる。
+        let board = |black_rank: u8, white_rank: u8| ShogiBoard {
+            black_king_sq: shogi_format::types::Square::new(4, black_rank),
+            white_king_sq: shogi_format::types::Square::new(4, white_rank),
+            ..Default::default()
+        };
+        let mode = BucketMode::ProgressKpAbsQ16EnteringKing;
+        assert_eq!(mode.bucket_board(&board(8, 0), 9), 4);
+        assert_eq!(mode.bucket_board(&board(4, 4), 9), 8);
+        assert_eq!(mode.bucket_board(&board(2, 6), 9), 8);
+        assert_eq!(mode.bucket_board(&board(5, 6), 9), 4);
+        assert_eq!(mode.bucket_board(&board(2, 3), 9), 4);
     }
 
     /// shogi-format crate test fixture (100 records × 40 bytes = 4000 bytes)。
@@ -2938,6 +2987,46 @@ mod tests {
         assert_eq!(batch.n_positions, 16);
         assert_eq!(buckets, expected);
         assert!(buckets.iter().all(|&bucket| (0..9).contains(&bucket)));
+        loader.recycle((batch, buckets));
+    }
+
+    #[test]
+    fn bucketed_loader_dispatches_entering_king_mode() {
+        let path = sample_psv_path();
+        let end = full_range_end(&path);
+        let mut expected_reader = PsvFileLoader::new(&path).expect("open sample PSV");
+        let mut expected = Vec::new();
+        for _ in 0..16 {
+            let board = expected_reader
+                .next_psv()
+                .expect("read sample PSV")
+                .expect("sample record")
+                .decode();
+            // 重みは未ロード (和 0) なので、相入玉でなければ 8 bucket の中央 (4)。
+            let mutual = board.black_king_sq.rank() <= 4 && board.white_king_sq.rank() >= 4;
+            expected.push(if mutual { 8 } else { 4 });
+        }
+
+        let mut loader = BucketedPrefetchedLoader::spawn(
+            &path,
+            16,
+            None,
+            None,
+            1,
+            BucketMode::ProgressKpAbsQ16EnteringKing,
+            test_spec(),
+            true,
+            9,
+            end,
+            false,
+        )
+        .expect("spawn entering-king loader");
+        let (batch, buckets) = loader
+            .next_batch()
+            .expect("load batch")
+            .expect("full batch");
+        assert_eq!(batch.n_positions, 16);
+        assert_eq!(buckets, expected);
         loader.recycle((batch, buckets));
     }
 

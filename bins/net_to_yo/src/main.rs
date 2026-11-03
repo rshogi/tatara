@@ -30,7 +30,11 @@ struct DetectedArch {
 #[command(group(
     ArgGroup::new("routing")
         .required(true)
-        .args(["assume_kingrank9", "assume_progresskpabs"])
+        .args([
+            "assume_kingrank9",
+            "assume_progresskpabs",
+            "assume_progresskpabsq16ek"
+        ])
 ))]
 struct Args {
     /// tatara LayerStack quantised .bin
@@ -49,6 +53,13 @@ struct Args {
     /// A single-bucket net is written without the suffix and needs no `progress.bin`.
     #[arg(long)]
     assume_progresskpabs: bool,
+    /// Assert that the input was trained with `--bucket-mode progresskpabsq16ek` (9 buckets:
+    /// Q16 progress split into buckets 0-7, mutual entering-king positions in bucket 8).
+    /// The output names the network `..._K3K3` with nine LayerStacks. To get the same buckets,
+    /// run YaneuraOu with `LS_BUCKET_MODE progress8ek` and the training `progress.bin`
+    /// (`LS_PROGRESS_COEFF`, resolved next to `nn.bin`).
+    #[arg(long)]
+    assume_progresskpabsq16ek: bool,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,7 +67,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.input == args.output {
         return Err("input and output must be different paths".into());
     }
-    let routing = routing_from_assertions(args.assume_kingrank9, args.assume_progresskpabs)?;
+    let routing = routing_from_assertions(
+        args.assume_kingrank9,
+        args.assume_progresskpabs,
+        args.assume_progresskpabsq16ek,
+    )?;
 
     let detect_input = File::open(&args.input)?;
     let arch = detect_arch(&mut BufReader::new(detect_input), routing)?;
@@ -83,12 +98,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn routing_from_assertions(
     assume_kingrank9: bool,
     assume_progresskpabs: bool,
+    assume_progresskpabsq16ek: bool,
 ) -> io::Result<YaneuraOuRouting> {
-    match (assume_kingrank9, assume_progresskpabs) {
-        (true, false) => Ok(YaneuraOuRouting::KingRank9),
-        (false, true) => Ok(YaneuraOuRouting::ProgressKpAbs),
+    match (
+        assume_kingrank9,
+        assume_progresskpabs,
+        assume_progresskpabsq16ek,
+    ) {
+        (true, false, false) => Ok(YaneuraOuRouting::KingRank9),
+        (false, true, false) => Ok(YaneuraOuRouting::ProgressKpAbs),
+        (false, false, true) => Ok(YaneuraOuRouting::ProgressKpAbsQ16EnteringKing),
         _ => invalid_input(
-            "tatara .bin files do not record bucket routing; pass exactly one of --assume-kingrank9 or --assume-progresskpabs after confirming the --bucket-mode the net was trained with",
+            "tatara .bin files do not record bucket routing; pass exactly one of --assume-kingrank9, --assume-progresskpabs or --assume-progresskpabsq16ek after confirming the --bucket-mode the net was trained with",
         ),
     }
 }
@@ -124,6 +145,11 @@ fn detect_arch<R: Read>(reader: &mut R, routing: YaneuraOuRouting) -> io::Result
         YaneuraOuRouting::KingRank9 if num_buckets != YANEURAOU_LAYER_STACKS => {
             return invalid_input(format!(
                 "YaneuraOu SFNN requires {YANEURAOU_LAYER_STACKS} LayerStacks (KingRank9), but the input has {num_buckets} buckets"
+            ));
+        }
+        YaneuraOuRouting::ProgressKpAbsQ16EnteringKing if num_buckets != YANEURAOU_LAYER_STACKS => {
+            return invalid_input(format!(
+                "entering-king routing requires {YANEURAOU_LAYER_STACKS} LayerStacks, but the input has {num_buckets} buckets"
             ));
         }
         YaneuraOuRouting::ProgressKpAbs
@@ -461,19 +487,63 @@ mod tests {
 
     #[test]
     fn routing_requires_exactly_one_explicit_assertion() {
-        for (kingrank9, progress) in [(false, false), (true, true)] {
-            let error = routing_from_assertions(kingrank9, progress).unwrap_err();
+        for (kingrank9, progress, entering_king) in [
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            let error = routing_from_assertions(kingrank9, progress, entering_king).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
             assert!(error.to_string().contains("--assume-kingrank9"));
+            assert!(error.to_string().contains("--assume-progresskpabsq16ek"));
         }
         assert_eq!(
-            routing_from_assertions(true, false).unwrap(),
+            routing_from_assertions(true, false, false).unwrap(),
             YaneuraOuRouting::KingRank9
         );
         assert_eq!(
-            routing_from_assertions(false, true).unwrap(),
+            routing_from_assertions(false, true, false).unwrap(),
             YaneuraOuRouting::ProgressKpAbs
         );
+        assert_eq!(
+            routing_from_assertions(false, false, true).unwrap(),
+            YaneuraOuRouting::ProgressKpAbsQ16EnteringKing
+        );
+    }
+
+    #[test]
+    fn detect_arch_requires_nine_buckets_for_entering_king() {
+        let arch_str = build_arch_str(
+            FeatureSet::HalfKaHmMerged.spec().arch_feature_name(),
+            73305,
+            1024,
+            16,
+            30,
+            64,
+            Some(28),
+            None,
+            None,
+            None,
+        );
+        let bytes = header_bytes(NNUE_VERSION, &arch_str, Some(9));
+        let arch = detect_arch(
+            &mut std::io::Cursor::new(bytes),
+            YaneuraOuRouting::ProgressKpAbsQ16EnteringKing,
+        )
+        .expect("nine buckets");
+        assert_eq!(arch.num_buckets, 9);
+        assert_eq!(arch.ft_out, 1024);
+        for buckets in [1_u32, 8, 10] {
+            let bytes = header_bytes(NNUE_VERSION, &arch_str, Some(buckets));
+            let error = detect_arch(
+                &mut std::io::Cursor::new(bytes),
+                YaneuraOuRouting::ProgressKpAbsQ16EnteringKing,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("entering-king"), "got: {error}");
+        }
     }
 
     /// zeroed weights から合成した tatara `.bin` を返す。
@@ -542,6 +612,31 @@ mod tests {
             expect.num_buckets = buckets;
             let bytes = synthetic_bin(FeatureSet::HalfKaHmMerged, 256, 16, 64, buckets);
             let out = convert(&bytes, &expect, YaneuraOuRouting::ProgressKpAbs);
+            assert_eq!(yo_arch_str(&out), expected_arch);
+        }
+    }
+
+    #[test]
+    fn entering_king_pipeline_names_network_k3k3_with_nine_stacks() {
+        for (ft_out, l2_out, expected_arch) in [
+            (
+                256_usize,
+                64_usize,
+                "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->256x2],Network=SFNN_HALFKAHM2_256_15_64_K3K3{LayerStack=9}",
+            ),
+            (
+                1536,
+                32,
+                "ModelType=SFNNWithoutPsqt;Features=HalfKA_hm2(Friend)[73305->1536x2],Network=SFNN_HALFKAHM2_1536_15_32_K3K3{LayerStack=9}",
+            ),
+        ] {
+            let expect = detected(FeatureSet::HalfKaHmMerged, ft_out, 16, l2_out);
+            let bytes = synthetic_bin(FeatureSet::HalfKaHmMerged, ft_out, 16, l2_out, 9);
+            let out = convert(
+                &bytes,
+                &expect,
+                YaneuraOuRouting::ProgressKpAbsQ16EnteringKing,
+            );
             assert_eq!(yo_arch_str(&out), expected_arch);
         }
     }

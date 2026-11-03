@@ -4,7 +4,9 @@
 
 `layerstack` アーキは各局面を N 個の局面進行度 bucket のいずれかに振り分け、
 その割当を `progress.bin`——局面が 1 局の中でどこまで進んだかを推定する KP-abs
-係数——で決める。本ページは `progress.bin` の学習方法と、生成された bucket 分布の
+係数——で決める。(`--bucket-mode progresskpabsq16ek` では、双方の玉が盤の中段まで進んだ
+局面だけはこの振り分けを通らず 9 つ目の bucket に入る。それ以外の局面は通常どおり
+`progress.bin` で振り分ける。)本ページは `progress.bin` の学習方法と、生成された bucket 分布の
 確認方法を扱う。`simple` アーキは bucket を持たず不要。学習全体の流れは
 [docs/training-quickstart.ja.md](training-quickstart.ja.md) を参照。
 
