@@ -113,6 +113,32 @@ v9 以降の checkpoint では再指定不要。v8 以前から resume する場
 [nodchip 氏の記事](https://nodchip.hatenablog.com/entry/2026/02/04/000000) の
 アイデアに基づく。
 
+### YaneuraOu で読めるネットワーク
+
+`--feature-set` だけではネットワークは決まらない。特徴変換器と 2 つの隠れ層の幅も
+ネットワークの一部で、YaneuraOu のビルドはちょうど 1 つのネットワーク向けにコンパイル
+される。次の 4 つの `simple` ネットワークは、同名の YaneuraOu 評価関数ファイルと同じ
+file 構造で書き出すので、表の edition でビルドしたエンジンが変換なしで読み込める。
+4 つとも既定の `--activation crelu` を使う。
+
+| ネットワーク | `--feature-set` | `simple --arch` | YaneuraOu の `YANEURAOU_EDITION` |
+|---|---|---|---|
+| `halfkp_128x2_32_32` | `halfkp` | `128x2-32-32` | `YANEURAOU_ENGINE_NNUE_halfkp_128x2_32_32` |
+| `halfkp_256x2_32_32` | `halfkp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE` |
+| `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
+| `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
+
+ネットワーク名は [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) フォークの
+命名 (`NNUE_<feature>_<FT>x2_<H1>_<H2>`、同フォークの
+`source/eval/nnue/architectures/README.md` に説明がある) に従う。同フォークの Makefile は
+edition 名から architecture header を生成する。あるネットワーク向けにビルドしたエンジンに
+別のネットワークの `.bin` を読ませると、`NNUE hash mismatch` と `failed to read nn.bin` で
+拒否される。
+
+他の学習器が書いた `.bin` は `--init-from` で拒否されることがある。同じネットワークでも、
+header の architecture 文字列が tatara の書くものと違い得るため (層の名前、`ModelType=` の
+接頭辞、`fv_scale` の欠落)。
+
 ## セットアップ
 
 ### 環境要件
@@ -151,8 +177,8 @@ docker run --rm --gpus all ghcr.io/rshogi/tatara:latest simple
 image 名より後ろの引数はすべて `nnue-train` に渡る。教師データは読み取り専用で、出力先は
 container が消えても残る directory で mount し、どちらも container 内の path で指定する。
 `--data` は PSV を 1 file だけ取るので、shard は先に連結する (`cat shard-*.psv > train.psv`)。
-次は、`K+P` 入力 (`--feature-set kp`) の 256x2-32-32 の素の NNUE を学習する例で、
-YaneuraOu の KP256 と同じ形になる。標準 NNUE (HalfKP) なら `--feature-set halfkp` にする:
+次は `kp_256x2_32_32` を学習する例。別のネットワークにするときは、上の
+「YaneuraOu で読めるネットワーク」の表のとおり `--feature-set` と `--arch` を変える:
 
 ```bash
 docker run --rm --gpus all --user "$(id -u):$(id -g)" \
@@ -210,11 +236,9 @@ tatara が出力する量子化 `.bin` は [rshogi](https://github.com/SH11235/r
 限らず、アーキテクチャによっては推論部の追加実装をしないとロードできない。
 対応する 1536-16-32 LayerStack は
 [`net_to_yo`](docs/net-to-yaneuraou.md) で変換できる。
-`--feature-set kp` または `halfkp`、既定の CReLU、`--arch 256x2-32-32` で学習した
-`simple` の net は、YaneuraOu の KP256 と標準 NNUE (HalfKP) の評価関数ファイルと
-同じ file 構造なので、対応する edition (`YANEURAOU_ENGINE_NNUE_KP256`、または
-`YANEURAOU_ENGINE_NNUE`) の YaneuraOu にそのまま読める。出力の scale は file ではなく
-YaneuraOu の `FV_SCALE` option で決まる。
+「YaneuraOu で読めるネットワーク」の表にある `simple` ネットワークは、対応する edition の
+YaneuraOu にそのまま読める。出力の scale は file ではなく YaneuraOu の `FV_SCALE` option で
+決まる。
 学習済みの参考 net は
 [GitHub Releases](https://github.com/SH11235/tatara/releases) に添付している。
 自分で net を学習する場合の環境構築は [docs/setup.ja.md](docs/setup.ja.md) を参照。

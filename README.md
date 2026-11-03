@@ -124,6 +124,34 @@ produces `progress.bin`, the bucket coefficients for LayerStack. The approach of
 learning game progress and assigning it to output buckets is based on an idea
 from [a post by nodchip](https://nodchip.hatenablog.com/entry/2026/02/04/000000).
 
+### Networks YaneuraOu loads
+
+A `--feature-set` alone does not name a network: the width of the feature
+transformer and the two hidden layers are part of it, and a YaneuraOu build is
+compiled for exactly one such network. These four `simple` networks are
+written in the file layout of the YaneuraOu evaluation file of the same name,
+so a build of the listed edition loads the `.bin` without conversion. All four
+use the default `--activation crelu`.
+
+| Network | `--feature-set` | `simple --arch` | YaneuraOu `YANEURAOU_EDITION` |
+|---|---|---|---|
+| `halfkp_128x2_32_32` | `halfkp` | `128x2-32-32` | `YANEURAOU_ENGINE_NNUE_halfkp_128x2_32_32` |
+| `halfkp_256x2_32_32` | `halfkp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE` |
+| `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
+| `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
+
+The names follow the network naming of the
+[shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) fork
+(`NNUE_<feature>_<FT>x2_<H1>_<H2>`, described in its
+`source/eval/nnue/architectures/README.md`), whose Makefile generates the
+architecture header from the edition name. An engine built for one network
+refuses a `.bin` of another with `NNUE hash mismatch` and `failed to read nn.bin`.
+
+`.bin` files written by other trainers may be rejected by `--init-from`: the
+architecture string in their header can differ from the one tatara writes (the
+layer names, a `ModelType=` prefix, a missing `fv_scale`), even where the network
+is the same.
+
 ## Setup
 
 ### Requirements
@@ -164,9 +192,9 @@ docker run --rm --gpus all ghcr.io/rshogi/tatara:latest simple
 Everything after the image name goes to `nnue-train`. Mount the teacher data
 read-only and an output directory that outlives the container, and give both
 by their paths inside the container. `--data` takes one PSV file, so concatenate
-shards first (`cat shard-*.psv > train.psv`). This trains a plain NNUE with the
-`K+P` input (`--feature-set kp`) at 256x2-32-32, the shape of YaneuraOu's KP256;
-use `--feature-set halfkp` for its standard NNUE (HalfKP):
+shards first (`cat shard-*.psv > train.psv`). This trains the `kp_256x2_32_32`
+network; for another one, change `--feature-set` and `--arch` as in
+"Networks YaneuraOu loads" above:
 
 ```bash
 docker run --rm --gpus all --user "$(id -u):$(id -g)" \
@@ -236,12 +264,9 @@ engines such as YaneuraOu cannot necessarily load it as-is; depending on the
 architecture, some nets need additional inference code before they can be
 loaded. A supported LayerStack net can be converted to and from the YaneuraOu
 format with [`net_to_yo` / `net_from_yo`](docs/net-to-yaneuraou.md).
-A `simple` net trained with `--feature-set kp` or `halfkp`, the default CReLU
-activation and `--arch 256x2-32-32` has the file layout of YaneuraOu's KP256 and
-standard (HalfKP) NNUE files, so a YaneuraOu build of the matching edition
-(`YANEURAOU_ENGINE_NNUE_KP256`, or `YANEURAOU_ENGINE_NNUE`) loads it without
-conversion. YaneuraOu takes the output scale from its `FV_SCALE` option, not from
-the file.
+The `simple` networks listed under "Networks YaneuraOu loads" are loaded by a
+YaneuraOu build of the matching edition without conversion. YaneuraOu takes the
+output scale from its `FV_SCALE` option, not from the file.
 Pre-trained reference nets are attached to the
 [GitHub Releases](https://github.com/SH11235/tatara/releases). To train your
 own net, see the [setup guide](docs/setup.md).
