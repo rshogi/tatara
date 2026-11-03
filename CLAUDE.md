@@ -44,8 +44,52 @@ method 利用を誤ってエラー扱いさせる害がある。toolchain を上
 - negative result も commit を残す (revert commit + Issue 追記の 2 操作)
 - master への直接 push 禁止、必ず PR 経由
 - PR merge は CI green 必須、`--squash --delete-branch` で master に merge
+  (上流の取り込み PR だけは `--merge`。下の「上流 (SH11235/tatara) の取り込み」参照)
 - `git push --force` は master / merge 済 branch に絶対しない、`--no-verify`
   禁止 (CI を skip して push しない)
+
+## 上流 (SH11235/tatara) の取り込み
+
+このリポジトリは `SH11235/tatara` の fork。`origin` が fork (`rshogi/tatara`、既定 branch は
+`master`)、`upstream` が上流 (既定 branch は `main`)。上流への push と PR は作らない。
+
+**fork の clone では最初に `gh repo set-default rshogi/tatara` を実行する。** 既定のままだと `gh`
+の対象が上流になり得て、`--repo` を付け忘れた `gh pr create` / `gh pr merge` が上流に向かう。
+向きは `gh repo set-default --view` で確かめられる。以降の `gh pr` / `gh run` にも
+`--repo rshogi/tatara` を付ける。
+
+取り込みは `scripts/sync-upstream.sh` と次の手順で行う。
+
+1. `scripts/sync-upstream.sh status`: 上流にだけあるコミット、fork の変更と同じファイル、
+   追加の作業が要るファイル、merge の事前試算 (衝突の有無) を表示する。取り込むコミットが
+   無ければここで終わる。
+2. `scripts/sync-upstream.sh prepare`: `origin/master` から `sync/upstream-<sha>` を切り、
+   `upstream/main` を**マージコミット**で取り込む。衝突したら止まるので、下の表の向きで解消して
+   `git add` のあと `git commit` する。
+3. 検証する。「CI 規約」の `scripts/local-ci.sh` が使えないときは、少なくとも
+   `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、
+   `cargo test --workspace --release` (GPU を使うテストを含む) を全て通す。`status` が CUDA
+   kernel の変更を報告したら、`nnue-train --feature-set kp simple` と
+   `--feature-set halfkp simple` の smoke、短い学習も走らせる。
+4. `git push -u origin sync/upstream-<sha>` のあと
+   `gh pr create --repo rshogi/tatara --base master`。本文に取り込むコミットの一覧と、
+   実行した検証を書く。
+5. PR のチェックが**全て終わる**まで待つ。Docker image の job は fmt / clippy / test より遅い。
+   `gh pr checks <N> --repo rshogi/tatara` に pending が残るうちはマージしない。
+6. `gh pr merge <N> --repo rshogi/tatara --merge --delete-branch`。squash と rebase は使わない。
+   上流のコミットが履歴の祖先にならず、次の取り込みで同じ変更が衝突する。
+7. master への push で Deployment が動き、`ghcr.io/rshogi/tatara` の `latest` が置き換わる。run が
+   成功し、`sha-<短縮 sha>` の tag が付いたことを確認する。
+
+衝突しやすい箇所と、解消の向き:
+
+| ファイル | 向き |
+|---|---|
+| `.github/workflows/checks.yaml` | fork に `checks.yaml` は無く、`integration.yaml` がその内容を引き継いでいる。上流の変更は `integration.yaml` の `checks` job に手で写し、`checks.yaml` は作り直さない |
+| `CLAUDE.md` / `AGENTS.md` | branch 名は `master` を残し、上流の追記だけ取り込む |
+| `FeatureSet` を網羅する箇所 (`crates/shogi-features/src/feature_set.rs` ほか) | fork の `kp` を残す。上流が feature set を足したときは、`FeatureSet::ALL` の長さと全 match の腕を両方の変種で揃える (腕の不足はコンパイルが教える)。`kp` と `halfkp` のヘッダが配布されている評価関数ファイルと一致することは、`cargo test -p nnue-format` の `*_matches_the_distributed_net` が見張る |
+| README / quickstart の `--feature-set` の表と一覧 | `kp` の行を残す |
+| `Dockerfile` / `.dockerignore` / `.github/workflows/` | fork の版を残す。上流が同名のファイルを足したときは、内容を読んで両立させる |
 
 ## コードコメント規約
 
