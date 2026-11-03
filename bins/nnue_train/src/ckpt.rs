@@ -33,7 +33,7 @@ use crate::trainer_common::MomentBuf;
 //   arch_kind    UTF-8 [arch_len]     (arch kind canonical 名、例 "layerstack")
 //   bucket_mode_len u32              (v8+、bucket mode 名の長さ、bucket 無しは 0)
 //   bucket_mode  UTF-8 [bucket_mode_len] (例 "progresskpabs" / "progresskpabsq16" /
-//                "progresskpabsq16ek" / "kingrank9"。
+//                "progresskpabsq16ek" / "progresskpabsq16pad" / "kingrank9"。
 //                reader は非推奨 alias "progress8kpabs" も progresskpabs として受理)
 //   topo_count   u64                 (topology 次元の個数)
 //   topology     u64 [topo_count]     (arch 固有の層次元列)
@@ -106,8 +106,8 @@ pub(crate) const RAW_CKPT_MAGIC: [u8; 4] = *b"RNRC";
 /// - `8`: a bucket-mode name (length-prefixed UTF-8, empty when the architecture
 ///   has no bucket concept) follows the arch-kind name. Cross-bucket-mode resumes
 ///   are rejected. The reader also accepts the deprecated alias spelling
-///   "progress8kpabs" and treats it as "progresskpabs". "progresskpabsq16" and
-///   "progresskpabsq16ek" are distinct modes, so resuming across any two of the
+///   "progress8kpabs" and treats it as "progresskpabs". "progresskpabsq16",
+///   "progresskpabsq16ek" and "progresskpabsq16pad" are distinct modes, so resuming across any two of the
 ///   bucket modes is rejected. For v<=7 layerstack
 ///   checkpoints the mode is absent and is interpreted as "progresskpabs" (the
 ///   only mode that existed when they were written).

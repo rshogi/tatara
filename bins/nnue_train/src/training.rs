@@ -32,6 +32,7 @@ use shogi_features::progress_kpabs::ShogiProgressKPAbs;
 #[cfg(any(feature = "gpu", test))]
 use shogi_features::{
     ENTERING_KING_NUM_BUCKETS, FeatureSet, FeatureSetSpec, KINGRANK9_NUM_BUCKETS,
+    PADDED_PROGRESS_NUM_STACKS,
 };
 #[cfg(feature = "gpu")]
 use shogi_features::{EffectBucketConfig, FtFactorizeMode, ThreatProfile};
@@ -376,6 +377,17 @@ pub(crate) fn validate_bucket_mode(
             if args.num_buckets != ENTERING_KING_NUM_BUCKETS {
                 return Err(format!(
                     "--num-buckets must be {ENTERING_KING_NUM_BUCKETS} when --bucket-mode {} is used (got {}); buckets 0..=7 split the progress and bucket 8 holds mutual entering-king positions",
+                    mode.canonical_name(),
+                    args.num_buckets,
+                )
+                .into());
+            }
+            Ok(mode)
+        }
+        BucketMode::ProgressKpAbsQ16Padded => {
+            if args.num_buckets != PADDED_PROGRESS_NUM_STACKS {
+                return Err(format!(
+                    "--num-buckets must be {PADDED_PROGRESS_NUM_STACKS} when --bucket-mode {} is used (got {}); stacks 0..=7 split the progress and stack 8 is kept in the file but never receives a position",
                     mode.canonical_name(),
                     args.num_buckets,
                 )

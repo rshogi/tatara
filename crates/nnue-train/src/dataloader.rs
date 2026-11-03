@@ -30,7 +30,10 @@ use std::thread;
 use std::time::Duration;
 
 use shogi_features::progress_kpabs::ShogiProgressKPAbs;
-use shogi_features::{ENTERING_KING_NUM_BUCKETS, FeatureSetSpec, kingrank9_bucket_board};
+use shogi_features::{
+    ENTERING_KING_NUM_BUCKETS, FeatureSetSpec, PADDED_PROGRESS_BUCKETS, PADDED_PROGRESS_NUM_STACKS,
+    kingrank9_bucket_board,
+};
 use shogi_format::{HCPE_RECORD_BYTES, HuffmanCodedPosAndEval, PackedSfenValue, ShogiBoard};
 
 /// PSV record size in bytes (`shogi_format::PackedSfenValue` is a fixed
@@ -311,6 +314,10 @@ pub enum BucketMode {
     /// それ以外は [`Self::ProgressKpAbsQ16`] で進行度を 8 等分した bucket 0..=7 に入れる。
     /// bucket 数は 9 固定。
     ProgressKpAbsQ16EnteringKing,
+    /// 進行度を [`Self::ProgressKpAbsQ16`] で 8 等分した bucket 0..=7 だけを使う。相入玉は
+    /// 見ず、末尾の bucket 8 には局面を送らない。stack 数は 9 固定で、bucket 8 は勾配を
+    /// 受けない。
+    ProgressKpAbsQ16Padded,
     /// 双方の玉段を手番視点に正規化した固定 9 bucket を使う。
     KingRank9,
 }
@@ -328,6 +335,7 @@ impl BucketMode {
             Self::ProgressKpAbs => "progresskpabs",
             Self::ProgressKpAbsQ16 => "progresskpabsq16",
             Self::ProgressKpAbsQ16EnteringKing => "progresskpabsq16ek",
+            Self::ProgressKpAbsQ16Padded => "progresskpabsq16pad",
             Self::KingRank9 => "kingrank9",
         }
     }
@@ -336,12 +344,15 @@ impl BucketMode {
     pub const fn uses_progress_coeff(self) -> bool {
         matches!(
             self,
-            Self::ProgressKpAbs | Self::ProgressKpAbsQ16 | Self::ProgressKpAbsQ16EnteringKing
+            Self::ProgressKpAbs
+                | Self::ProgressKpAbsQ16
+                | Self::ProgressKpAbsQ16EnteringKing
+                | Self::ProgressKpAbsQ16Padded
         )
     }
 
     /// bucket mode 名をパースする。canonical 名 (`progresskpabs` / `progresskpabsq16` /
-    /// `progresskpabsq16ek` / `kingrank9`) に加え、[`Self::LEGACY_PROGRESS_KPABS_NAME`]
+    /// `progresskpabsq16ek` / `progresskpabsq16pad` / `kingrank9`) に加え、[`Self::LEGACY_PROGRESS_KPABS_NAME`]
     /// も受理する。返り値の bool は legacy alias 経由で一致したかで、CLI 入力の
     /// 呼び出し元が非推奨警告を出す判断に使う (checkpoint header の読み戻しでは警告不要なので無視する)。
     pub fn parse(name: &str) -> Option<(Self, bool)> {
@@ -349,6 +360,7 @@ impl BucketMode {
             "progresskpabs" => Some((Self::ProgressKpAbs, false)),
             "progresskpabsq16" => Some((Self::ProgressKpAbsQ16, false)),
             "progresskpabsq16ek" => Some((Self::ProgressKpAbsQ16EnteringKing, false)),
+            "progresskpabsq16pad" => Some((Self::ProgressKpAbsQ16Padded, false)),
             Self::LEGACY_PROGRESS_KPABS_NAME => Some((Self::ProgressKpAbs, true)),
             "kingrank9" => Some((Self::KingRank9, false)),
             _ => None,
@@ -371,7 +383,7 @@ impl BucketMode {
             }
             Some((mode, false)) => Ok((mode, None)),
             None => Err(format!(
-                "--bucket-mode '{name}' is unknown (expected 'progresskpabs', 'progresskpabsq16', 'progresskpabsq16ek' or 'kingrank9')"
+                "--bucket-mode '{name}' is unknown (expected 'progresskpabs', 'progresskpabsq16', 'progresskpabsq16ek', 'progresskpabsq16pad' or 'kingrank9')"
             )),
         }
     }
@@ -385,6 +397,10 @@ impl BucketMode {
             Self::ProgressKpAbsQ16EnteringKing => {
                 debug_assert_eq!(num_buckets, ENTERING_KING_NUM_BUCKETS);
                 ShogiProgressKPAbs.bucket_q16_entering_king_board(board)
+            }
+            Self::ProgressKpAbsQ16Padded => {
+                debug_assert_eq!(num_buckets, PADDED_PROGRESS_NUM_STACKS);
+                ShogiProgressKPAbs.bucket_q16_board(board, PADDED_PROGRESS_BUCKETS)
             }
             Self::KingRank9 => kingrank9_bucket_board(board),
         }
@@ -1285,9 +1301,9 @@ impl BucketedPrefetchedLoader {
     /// `score_clamp_abs` が `Some(c)` なら drop を生き残った position の score を
     /// `[-c, c]` に飽和させる (`--score-clamp-abs`)。
     /// `bucket_mode` は output bucket の算出方式。`ProgressKpAbs` / `ProgressKpAbsQ16` /
-    /// `ProgressKpAbsQ16EnteringKing` の重みは process-global なので呼び出し前に
-    /// `ShogiProgressKPAbs::load_from_bin` 済であること、未ロードなら全 bucket 4
-    /// (`ProgressKpAbsQ16EnteringKing` は相入玉でない局面だけ)。`KingRank9` は外部重みを参照しない。
+    /// `ProgressKpAbsQ16EnteringKing` / `ProgressKpAbsQ16Padded` の重みは process-global
+    /// なので呼び出し前に `ShogiProgressKPAbs::load_from_bin` 済であること、未ロードなら
+    /// 全 bucket 4 (`ProgressKpAbsQ16EnteringKing` は相入玉でない局面だけ)。`KingRank9` は外部重みを参照しない。
     /// `feature_set` は sparse index 化に使う feature set spec で、全 worker が共有する。
     /// `num_buckets` は progress mode の bucket 数。`compute_bucket = false` (Simple アーキ) では bucket
     /// 計算自体が skip されるが、worker 側 assertion (`num_buckets >= 1`) は常に
@@ -1700,6 +1716,10 @@ mod tests {
             BucketMode::parse("progresskpabsq16ek"),
             Some((BucketMode::ProgressKpAbsQ16EnteringKing, false))
         ));
+        assert!(matches!(
+            BucketMode::parse("progresskpabsq16pad"),
+            Some((BucketMode::ProgressKpAbsQ16Padded, false))
+        ));
         // 非推奨 alias は legacy flag 付きで受理。
         assert!(matches!(
             BucketMode::parse(BucketMode::LEGACY_PROGRESS_KPABS_NAME),
@@ -1712,6 +1732,7 @@ mod tests {
             BucketMode::ProgressKpAbs,
             BucketMode::ProgressKpAbsQ16,
             BucketMode::ProgressKpAbsQ16EnteringKing,
+            BucketMode::ProgressKpAbsQ16Padded,
             BucketMode::KingRank9,
         ] {
             let (parsed, legacy) = BucketMode::parse(mode.canonical_name()).unwrap();
@@ -1727,6 +1748,7 @@ mod tests {
             BucketMode::ProgressKpAbs,
             BucketMode::ProgressKpAbsQ16,
             BucketMode::ProgressKpAbsQ16EnteringKing,
+            BucketMode::ProgressKpAbsQ16Padded,
             BucketMode::KingRank9,
         ] {
             let (parsed, warning) = BucketMode::parse_cli(mode.canonical_name()).unwrap();
@@ -1755,6 +1777,7 @@ mod tests {
         assert!(err.contains("'progresskpabs'"), "{err}");
         assert!(err.contains("progresskpabsq16"), "{err}");
         assert!(err.contains("progresskpabsq16ek"), "{err}");
+        assert!(err.contains("progresskpabsq16pad"), "{err}");
         assert!(err.contains("kingrank9"), "{err}");
     }
 
@@ -1764,6 +1787,7 @@ mod tests {
             BucketMode::ProgressKpAbs,
             BucketMode::ProgressKpAbsQ16,
             BucketMode::ProgressKpAbsQ16EnteringKing,
+            BucketMode::ProgressKpAbsQ16Padded,
         ] {
             assert!(mode.uses_progress_coeff(), "{}", mode.canonical_name());
         }
@@ -2987,6 +3011,58 @@ mod tests {
         assert_eq!(batch.n_positions, 16);
         assert_eq!(buckets, expected);
         assert!(buckets.iter().all(|&bucket| (0..9).contains(&bucket)));
+        loader.recycle((batch, buckets));
+    }
+
+    #[test]
+    fn padded_progress_mode_ignores_the_kings_and_never_uses_the_last_bucket() {
+        // 重みは未ロードなので進行度は 0.5 (中央の bucket 4)。相入玉の局面でも
+        // ek mode のように bucket 8 へは行かない。
+        let board = |black_rank: u8, white_rank: u8| ShogiBoard {
+            black_king_sq: shogi_format::types::Square::new(4, black_rank),
+            white_king_sq: shogi_format::types::Square::new(4, white_rank),
+            ..Default::default()
+        };
+        let mode = BucketMode::ProgressKpAbsQ16Padded;
+        for (black_rank, white_rank) in [(8, 0), (4, 4), (2, 6), (5, 6), (2, 3)] {
+            let b = board(black_rank, white_rank);
+            assert_eq!(mode.bucket_board(&b, 9), 4, "{black_rank} {white_rank}");
+            assert_eq!(
+                mode.bucket_board(&b, 9),
+                BucketMode::ProgressKpAbsQ16.bucket_board(&b, 8)
+            );
+        }
+        assert_eq!(
+            BucketMode::ProgressKpAbsQ16EnteringKing.bucket_board(&board(4, 4), 9),
+            8
+        );
+    }
+
+    #[test]
+    fn bucketed_loader_dispatches_padded_progress_mode() {
+        let path = sample_psv_path();
+        let end = full_range_end(&path);
+        let mut loader = BucketedPrefetchedLoader::spawn(
+            &path,
+            16,
+            None,
+            None,
+            1,
+            BucketMode::ProgressKpAbsQ16Padded,
+            test_spec(),
+            true,
+            9,
+            end,
+            false,
+        )
+        .expect("spawn padded-progress loader");
+        let (batch, buckets) = loader
+            .next_batch()
+            .expect("load batch")
+            .expect("full batch");
+        assert_eq!(batch.n_positions, 16);
+        // 重みは未ロードなので、全局面が中央の bucket 4 に入り、bucket 8 は空のまま。
+        assert!(buckets.iter().all(|&bucket| bucket == 4), "{buckets:?}");
         loader.recycle((batch, buckets));
     }
 

@@ -1174,11 +1174,12 @@ pub(crate) struct LayerstackArgs {
 
     /// Progress coefficient file (`progress.bin`; f64 LE x 125388 = 81
     /// king squares x 1548 KP-abs piece inputs) for progresskpabs,
-    /// progresskpabsq16 and progresskpabsq16ek. When omitted in those modes,
-    /// every position that uses the progress split falls in the middle bucket
-    /// `floor(N / 2)` (zero weights → `sigmoid(0) = 0.5`; bucket 4 for the
-    /// default 9 buckets and for the 8-way progress split of
-    /// progresskpabsq16ek). Do not specify this option in kingrank9 mode.
+    /// progresskpabsq16, progresskpabsq16ek and progresskpabsq16pad. When
+    /// omitted in those modes, every position that uses the progress split
+    /// falls in the middle bucket `floor(N / 2)` (zero weights →
+    /// `sigmoid(0) = 0.5`; bucket 4 for the default 9 buckets and for the
+    /// 8-way progress split of progresskpabsq16ek and progresskpabsq16pad).
+    /// Do not specify this option in kingrank9 mode.
     #[arg(long)]
     pub(crate) progress_coeff: Option<PathBuf>,
 
@@ -1194,6 +1195,11 @@ pub(crate) struct LayerstackArgs {
     /// white king stands on ranks 5 to 9 (rank 1 is the white side of the
     /// board) go to bucket 8, and every other position is split into buckets 0
     /// to 7 by the Q16 progress. It requires exactly 9 buckets.
+    /// `progresskpabsq16pad` splits every position into buckets 0 to 7 by the
+    /// Q16 progress and never looks at the kings; the ninth stack (bucket 8) is
+    /// written to the file but receives no position, so it gets no gradient.
+    /// The optimizer's weight decay and norm loss still act on its weights. It
+    /// requires exactly 9 buckets.
     /// `kingrank9` uses YaneuraOu KingRank9 and requires exactly 9 buckets. The
     /// deprecated spelling `progress8kpabs` is accepted as an alias of
     /// `progresskpabs` (the digit is not the bucket count; see `--num-buckets`).
@@ -1227,7 +1233,8 @@ pub(crate) struct LayerstackArgs {
     /// LayerStack output bucket count. In progresskpabs mode, each position is
     /// routed to `min(N-1, floor(p * N))` (progresskpabsq16 uses the same split
     /// in integer logit space) and N must be in `[2, 9]`. In
-    /// kingrank9 and progresskpabsq16ek modes this value must be 9. The upper bound is the fixed 9-register accumulator
+    /// kingrank9, progresskpabsq16ek and progresskpabsq16pad modes this value
+    /// must be 9. The upper bound is the fixed 9-register accumulator
     /// in the per-bucket weight backward kernels. The default 9 keeps the
     /// binning and weight-buffer shape identical to the standard layout and
     /// resume-compatible with existing checkpoints. The historical 8-bucket
