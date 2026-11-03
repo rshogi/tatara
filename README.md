@@ -173,7 +173,8 @@ applies. Put the `progress.bin` next to `nn.bin` in the evaluation directory. Fo
 default `progress8kpabs` the engine loads the file without a warning and picks
 different stacks. `progress8kpabs` is the engine's default `LS_BUCKET_MODE`. Stack 8 of
 a `progress8kpabs` network receives no position in training, so nothing is learned
-there.
+there, and its weights do not affect how the other stacks train (see
+[details](docs/net-to-yaneuraou.md) for `--norm-loss`).
 
 The names follow the network naming of the
 [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) fork

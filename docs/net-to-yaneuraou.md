@@ -131,13 +131,23 @@ bucket の規則は次のとおり (YaneuraOu の段は 1 段目を 0 とする)
 がこの規則で、同じ bucket を選ぶ。`progress8ek` にすると相入玉局面が stack 8 に回り、別の値を返す。
 学習した net の stack 8 は使われないので、その重みは評価に影響しない。
 
-stack 8 の重みが学習で更新されないわけではない点に注意する。stack 8 は勾配を受けないが、
-optimizer の weight decay と norm loss は weight group 全体に掛かるので、`--weight-decay` や
-`--norm-loss` を使うとその重みも動く。`--optimizer ranger` で 0 から学習すると、最初の lookahead
-同期で stack 8 を含む全重みが alpha 倍になる。いずれも評価には影響しない。`--init-from` で読み込んだ
-重みから `--weight-decay 0` で学習する場合は、stack 8 の per-bucket の重みは bit 単位で動かない。
-ただし書き出す L1 は stack ごとの重みと全 stack 共通の L1 shared 項の和なので、共通項が動くと
-書き出した stack 8 の L1 の値も変わる。
+stack 8 の重みが学習中に動かないわけではない。stack 8 は勾配を受けず、optimizer の 1 次・2 次
+moment は 0 のままだが、weight decay と norm loss は weight group 全体に掛かるので、`--weight-decay`
+や `--norm-loss` を使うとその重みも動く。`--optimizer ranger` で 0 から学習すると、最初の lookahead
+同期で stack 8 を含む全重みが alpha 倍になる。`--init-from` で読み込んだ重みから `--weight-decay 0`、
+`--norm-loss` なしで学習する場合は、stack 8 の per-bucket の重みは bit 単位で動かない。ただし書き出す
+L1 は stack ごとの重みと全 stack 共通の L1 shared 項の和なので、共通項が動くと書き出した stack 8 の
+L1 の値も変わる。
+
+stack 8 の重みが動いても評価には影響しない。YaneuraOu は `LS_BUCKET_MODE` が既定の `progress8kpabs`
+のとき stack 8 を読まない。また stack 8 の初期値は、ほかの tensor の学習に影響しない。weight decay と
+lookahead では、stack 8 の初期値を変えても、ほかの tensor の差は同じ入力を 2 回学習したときの差
+(GPU の勾配集計の加算順による揺れ) を超えない。例外は `--norm-loss` で、bias は tensor 全体で 1 つの
+L2 norm を取って補正するため、stack 8 の bias の値がほかの stack の bias の補正量に入る。weight は
+出力ニューロンの行ごとに norm を取るので影響しない。`--init-from` で読み込む net の stack 8 の bias が 0
+でなければ、`--norm-loss` を使うとほかの stack の bias の学習がその値に左右される。
+`LS_BUCKET_MODE` を `progress8ek` にして読むと stack 8 が相入玉局面に使われ、その重みは意味を持たない
+ので、取り違えに注意する。
 
 配布されている `progress8kpabs` のネットワーク (9 stack、`_K3K3` 名) は、`net_from_yo
 --assume-progresskpabsq16pad` で取り込める。`net_to_yo --assume-progresskpabsq16pad` で書き戻した

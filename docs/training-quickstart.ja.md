@@ -76,7 +76,9 @@ bucket 0〜7 に入る。`progresskpabsq16` と同じ `progress.bin` を使う�
 送られないので、その重みは学習されない。`progresskpabsq16` と同じ `progress.bin` を使う。bucket の規則は、
 YaneuraOu の `..._progress8kpabs` ネットワークが既定の `LS_BUCKET_MODE progress8kpabs` で使うものと
 同じ。optimizer の weight decay と norm loss は全 stack に掛かるので、`--weight-decay` や `--norm-loss`
-を使うと stack 8 の重みも動く。エンジンは stack 8 を読まない。
+を使うと stack 8 の重みも動く。エンジンは stack 8 を読まない。stack 8 の重みは、ほかの stack の学習には
+影響しない。例外は `--norm-loss` で、bias は tensor 全体で 1 つの L2 norm を取って補正するため、
+stack 8 の bias の値がほかの stack の bias の補正量に入る。
 `kingrank9` は YaneuraOu KingRank9 と同じく、双方の玉段を手番側視点へ正規化して
 3x3 の固定 9 bucket に分ける。この mode では `progress.bin` は使わない。
 

@@ -158,7 +158,8 @@ directory に `nn.bin` と並べて `progress.bin` を置く。`progress8ek` の
 `eval_options.txt` に `LS_BUCKET_MODE progress8ek` と書く。既定の `progress8kpabs` のままだと、
 エンジンは警告なしに読み込み、別の stack を選ぶ。`progress8kpabs` はエンジンの
 `LS_BUCKET_MODE` の既定値である。`progress8kpabs` のネットワークの stack 8 には学習中に
-局面が一つも送られないので、そこでは何も学習されない。
+局面が一つも送られないので、そこでは何も学習されず、その重みはほかの stack の学習に影響しない
+(`--norm-loss` の場合は[詳細](docs/net-to-yaneuraou.md)を参照)。
 
 ネットワーク名は [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) フォークの
 命名 (`NNUE_<feature>_<FT>x2_<H1>_<H2>`、同フォークの

@@ -89,7 +89,10 @@ the kings: no position is sent to stack 8, so its weights are not trained. It ne
 the same `progress.bin`. It is the bucket rule YaneuraOu uses with its default
 `LS_BUCKET_MODE progress8kpabs` for the `..._progress8kpabs` networks. The optimizer's
 weight decay and norm loss act on every stack, so with `--weight-decay` or
-`--norm-loss` the weights of stack 8 still move; the engine never reads them.
+`--norm-loss` the weights of stack 8 still move; the engine never reads them. They
+do not affect how the other stacks train, with one exception: `--norm-loss` takes
+one L2 norm over each whole bias tensor, so the bias values of stack 8 enter the
+correction applied to the biases of the other stacks.
 `kingrank9` matches YaneuraOu KingRank9: it normalises both king ranks to the
 side-to-move perspective and selects one of a fixed 3x3 grid of 9 buckets. It
 does not use `progress.bin`.
