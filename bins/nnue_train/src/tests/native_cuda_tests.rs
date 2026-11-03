@@ -17,7 +17,8 @@ use crate::{
     arch::{SMOKE_BATCH, SMOKE_LOSS_WRM},
     trainer_common::{BatchData, PrecisionFlags},
     trainer_layerstack::{
-        FactorizerVirtualBlock, GpuTrainer as LayerStackGpuTrainer, OptimGroupConfig,
+        FactorizerVirtualBlock, GpuTrainer as LayerStackGpuTrainer, LayerStackRawCheckpointState,
+        OptimGroupConfig,
     },
     trainer_simple::SimpleGpuTrainer,
 };
@@ -588,6 +589,7 @@ struct LayerStackTestOptions {
     optimizer: OptimizerKind,
     norm_loss_factor: Option<f32>,
     psqt: bool,
+    weight_decay: f32,
 }
 
 impl LayerStackTestOptions {
@@ -603,6 +605,7 @@ impl LayerStackTestOptions {
             optimizer: OptimizerKind::Ranger,
             norm_loss_factor: None,
             psqt: false,
+            weight_decay: 0.0,
         }
     }
 }
@@ -643,7 +646,7 @@ fn create_layerstack_trainer_with_batch(
             options.precision,
             options.feature_set,
             options.optimizer,
-            OptimGroupConfig::resolve(0.0, None, None, None, None, None, None),
+            OptimGroupConfig::resolve(options.weight_decay, None, None, None, None, None, None),
             options.norm_loss_factor,
             psqt_init.as_deref(),
             &LayerStackInit::default_uniform(),
@@ -3895,5 +3898,192 @@ fn fused_ft_norms_follow_external_weight_writes() -> Result<(), Box<dyn std::err
     assert!(fused.ft_fused_norm_sums_to_host_for_test()?.is_none());
     step_both(&mut fused, &mut separate)?;
     assert_same_weights("after resume", &fused, &separate)?;
+    Ok(())
+}
+
+/// LayerStack の 1 stack 分の重みと optimizer 状態を、group 名ごとに切り出す。
+/// 返り値は `(group 名, [w, m, v, slow] の stack 分の slice)`。
+fn stack_slices<'a>(
+    state: &'a LayerStackRawCheckpointState,
+    options: &LayerStackTestOptions,
+    stack: usize,
+) -> Vec<(&'static str, [&'a [f32]; 4])> {
+    let l2_in = (options.l1_out - 1) * 2;
+    let per_stack = [
+        ("l1_w", options.l1_out * options.ft_out),
+        ("l1_b", options.l1_out),
+        ("l2_w", options.l2_out * l2_in),
+        ("l2_b", options.l2_out),
+        ("l3_w", options.l2_out),
+        ("l3_b", 1),
+    ];
+    per_stack
+        .into_iter()
+        .map(|(name, len)| {
+            let (_, group) = state
+                .1
+                .iter()
+                .find(|(group_name, _)| *group_name == name)
+                .unwrap_or_else(|| panic!("group {name} is missing"));
+            let range = stack * len..(stack + 1) * len;
+            (
+                name,
+                [
+                    &group.0[range.clone()],
+                    &group.1[range.clone()],
+                    &group.2[range.clone()],
+                    &group.3[range],
+                ],
+            )
+        })
+        .collect()
+}
+
+fn count_differences(a: &[f32], b: &[f32]) -> usize {
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b)
+        .filter(|(x, y)| x.to_bits() != y.to_bits())
+        .count()
+}
+
+/// 9 stack の LayerStack に、bucket 0..=7 だけへ局面を送る学習 (`progresskpabsq16pad` の
+/// 振り分け) を 12 step 回し、stack 8 の重みと optimizer 状態を初期値と bit 比較した結果。
+struct PaddedStackRun {
+    /// stack 8 の `[w, m, v, slow]` のうち、初期値と bit が異なる要素数の合計。
+    changed_weights: usize,
+    changed_slow_weights: usize,
+    nonzero_first_moments: usize,
+    nonzero_second_moments: usize,
+    /// 学習された stack (0..=7) の `l1_w` / `l2_w` / `l3_w` のうち、`w` が変わった要素数。
+    trained_stacks_changed: usize,
+}
+
+fn run_padded_stack_training(
+    context: &std::sync::Arc<CudaContext>,
+    optimizer: OptimizerKind,
+    weight_decay: f32,
+    norm_loss_factor: Option<f32>,
+    warm_start: bool,
+) -> Result<PaddedStackRun, Box<dyn std::error::Error>> {
+    let options = LayerStackTestOptions {
+        num_buckets: 9,
+        optimizer,
+        weight_decay,
+        norm_loss_factor,
+        bucket_mode: BucketMode::ProgressKpAbsQ16Padded,
+        ..LayerStackTestOptions::standard()
+    };
+    let mut trainer = create_layerstack_trainer_with_options(context, true, options)?;
+    if warm_start {
+        // `--init-from` と同じ経路: 読み込んだ重みを lookahead の slow weight にも写す。
+        let weights = trainer.to_layerstack_weights()?;
+        trainer.load_layerstack_weights(&weights)?;
+    }
+    let before = trainer.raw_checkpoint_state_to_host()?;
+    let mut batch = BatchData::smoke_dummy(SMOKE_BATCH, options.feature_set);
+    for (row, bucket) in batch.bucket_idx.iter_mut().enumerate() {
+        *bucket = (row % 8) as i32;
+    }
+    for (row, score) in batch.score.iter_mut().enumerate() {
+        *score = 50.0 * ((row % 7) as f32 - 3.0);
+    }
+    batch.wdl.fill(0.8);
+    // Ranger の lookahead は 6 step ごとに同期するので、2 回分を含める。
+    for _ in 0..12 {
+        trainer.step(&batch.as_ref(), 1.0e-3, 0.0, SMOKE_LOSS_WRM)?;
+    }
+    let after = trainer.raw_checkpoint_state_to_host()?;
+
+    let unused_before = stack_slices(&before, &options, 8);
+    let unused_after = stack_slices(&after, &options, 8);
+    let mut run = PaddedStackRun {
+        changed_weights: 0,
+        changed_slow_weights: 0,
+        nonzero_first_moments: 0,
+        nonzero_second_moments: 0,
+        trained_stacks_changed: 0,
+    };
+    for ((_, b), (_, a)) in unused_before.iter().zip(&unused_after) {
+        run.changed_weights += count_differences(b[0], a[0]);
+        run.changed_slow_weights += count_differences(b[3], a[3]);
+        run.nonzero_first_moments += a[1].iter().filter(|x| x.to_bits() != 0).count();
+        run.nonzero_second_moments += a[2].iter().filter(|x| x.to_bits() != 0).count();
+    }
+    for stack in 0..8 {
+        let trained_before = stack_slices(&before, &options, stack);
+        let trained_after = stack_slices(&after, &options, stack);
+        for ((name, b), (_, a)) in trained_before.iter().zip(&trained_after) {
+            if matches!(*name, "l1_w" | "l2_w" | "l3_w") {
+                run.trained_stacks_changed += count_differences(b[0], a[0]);
+            }
+        }
+    }
+    Ok(run)
+}
+
+/// 局面を受けない stack 8 は勾配を一切受けない。1 次・2 次 moment は、optimizer や weight
+/// decay、norm loss の設定によらず 0 のままである。
+#[test]
+fn unused_stack_never_receives_a_gradient() -> Result<(), Box<dyn std::error::Error>> {
+    let context = test_cuda_context()?;
+    for optimizer in [
+        OptimizerKind::Ranger,
+        OptimizerKind::RAdam,
+        OptimizerKind::AdamW,
+    ] {
+        for (weight_decay, norm_loss_factor) in [(0.0, None), (0.01, None), (0.0, Some(1.0e-4))] {
+            let run = run_padded_stack_training(
+                &context,
+                optimizer,
+                weight_decay,
+                norm_loss_factor,
+                true,
+            )?;
+            let setting = format!("{optimizer:?} wd={weight_decay} norm_loss={norm_loss_factor:?}");
+            assert_eq!(run.nonzero_first_moments, 0, "{setting}");
+            assert_eq!(run.nonzero_second_moments, 0, "{setting}");
+            // 学習される stack は動いている (勾配が流れる設定で測っている)。
+            assert!(run.trained_stacks_changed > 0, "{setting}");
+        }
+    }
+    Ok(())
+}
+
+/// weight decay と norm loss を使わず、読み込んだ重みから学習を始める (`--init-from`) 場合、
+/// stack 8 の重みと lookahead の slow weight は bit 単位で動かない。
+#[test]
+fn unused_stack_weights_stay_bit_identical_without_decay() -> Result<(), Box<dyn std::error::Error>>
+{
+    let context = test_cuda_context()?;
+    for optimizer in [
+        OptimizerKind::Ranger,
+        OptimizerKind::RAdam,
+        OptimizerKind::AdamW,
+    ] {
+        let run = run_padded_stack_training(&context, optimizer, 0.0, None, true)?;
+        assert_eq!(run.changed_weights, 0, "{optimizer:?}");
+        assert_eq!(run.changed_slow_weights, 0, "{optimizer:?}");
+        assert!(run.trained_stacks_changed > 0, "{optimizer:?}");
+    }
+    Ok(())
+}
+
+/// optimizer の weight decay と norm loss は weight group 全体に掛かるため、stack 8 の重みも
+/// 動く (勾配による学習ではない)。上の bit 不変の test が動きを検出できることの対照であり、
+/// 未使用 stack を除外する仕組みを入れたらこの test を更新する。
+#[test]
+fn weight_decay_and_norm_loss_move_the_unused_stack_weights()
+-> Result<(), Box<dyn std::error::Error>> {
+    let context = test_cuda_context()?;
+    let decayed = run_padded_stack_training(&context, OptimizerKind::AdamW, 0.01, None, true)?;
+    assert!(decayed.changed_weights > 0);
+    let norm_loss =
+        run_padded_stack_training(&context, OptimizerKind::RAdam, 0.0, Some(1.0e-4), true)?;
+    assert!(norm_loss.changed_weights > 0);
+    // 0 から学習する Ranger は、最初の lookahead 同期 (slow weight が 0) で全重みが alpha 倍になる。
+    let from_scratch =
+        run_padded_stack_training(&context, OptimizerKind::Ranger, 0.0, None, false)?;
+    assert!(from_scratch.changed_weights > 0);
     Ok(())
 }
