@@ -33,12 +33,12 @@ GPU kernel を hand-fuse することで **極めて高速** — 実測した cu
 **実効 throughput** (`--batch-size 65536`, pos/s; fp32 → `--all-optim`(fp16/tf32))。
 `--all-optim` の効果は帯域律速の強い旧世代 GPU ほど、また net が大きいほど大きい:
 
-| arch / 構成 (feature) | RTX 5090 | RTX 3080 Ti | RTX 4070 Ti |
+| arch / 構成 (feature) | RTX 3080 Ti (Ampere) | RTX 4070 Ti (Ada) | RTX 5090 (Blackwell) |
 |---|---|---|---|
-| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 2.45M → 3.13M (+28%) | 0.99M → 1.59M (+61%) | 1.26M → 2.14M (+70%) |
-| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 4.24M → 5.10M (+20%) | 2.05M → 2.97M (+45%) | 2.69M → 4.14M (+54%) |
-| Simple `256x2-32-32` (`halfkp`) | 11.29M → 13.37M (+18%) | 7.30M → 10.10M (+38%) | 5.79M → 7.85M (+35%) |
-| Simple `256x2-32-32` (`kp`) | – | – | 6.69M → 6.15M (−8%) |
+| LayerStack `--ft-out 1536` (`halfka-hm-merged`) | 0.99M → 1.59M (+61%) | 1.26M → 2.14M (+70%) | 2.45M → 3.13M (+28%) |
+| LayerStack `--ft-out 768` (`halfka-hm-merged`) | 2.05M → 2.97M (+45%) | 2.69M → 4.14M (+54%) | 4.24M → 5.10M (+20%) |
+| Simple `256x2-32-32` (`halfkp`) | 7.30M → 10.10M (+38%) | 5.79M → 7.85M (+35%) | 11.29M → 13.37M (+18%) |
+| Simple `256x2-32-32` (`kp`) | – | 6.69M → 6.15M (−8%) | – |
 
 RTX 4070 Ti (12 GB) の列は、下の計測コマンドを教師 file を page cache に載せた状態で
 `--superbatches 3` (`--batches-per-superbatch` は LayerStack が 60、Simple が 150) で
@@ -127,26 +127,25 @@ v9 以降の checkpoint では再指定不要。v8 以前から resume する場
 ### YaneuraOu で読めるネットワーク
 
 `--feature-set` だけではネットワークは決まらない。特徴変換器と 2 つの隠れ層の幅も
-ネットワークの一部で、YaneuraOu のビルドはちょうど 1 つのネットワーク向けにコンパイル
-される。次の 4 つの `simple` ネットワークは、同名の YaneuraOu 評価関数ファイルと同じ
-file 構造で書き出すので、表の edition でビルドしたエンジンが変換なしで読み込める。
+ネットワークの一部である。次の 4 つの `simple` ネットワークは、同名の YaneuraOu 評価関数
+ファイルと同じ file 構造で書き出すので、YaneuraOu が変換なしで読み込める。
 4 つとも既定の `--activation crelu` を使う。
 
-| ネットワーク | `--feature-set` | `simple --arch` | YaneuraOu の `YANEURAOU_EDITION` |
+| ネットワーク | サブコマンド | `--feature-set` | サブコマンドの後ろの option |
 |---|---|---|---|
-| `halfkp_128x2_32_32` | `halfkp` | `128x2-32-32` | `YANEURAOU_ENGINE_NNUE_halfkp_128x2_32_32` |
-| `halfkp_256x2_32_32` | `halfkp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE` |
-| `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
-| `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
+| `halfkp_128x2_32_32` | `simple` | `halfkp` | `--arch 128x2-32-32` |
+| `halfkp_256x2_32_32` | `simple` | `halfkp` | `--arch 256x2-32-32` |
+| `halfkp_768x2_16_64` | `simple` | `halfkp` | `--arch 768x2-16-64` |
+| `kp_256x2_32_32` | `simple` | `kp` | `--arch 256x2-32-32` |
 
 `layerstack` のネットワークも 2 つ、NAGISA の評価関数ファイルと同じ file 構造で書き出せる。
 局面を 9 個の stack に振り分け、両玉が盤の中央まで入った局面は bucket 8、それ以外は
 進行度で bucket 0〜7 になる。進行度には、学習に使った `progress.bin` が要る。
 
-| ネットワーク | `layerstack` の option | YaneuraOu の `YANEURAOU_EDITION` |
-|---|---|---|
-| `halfkahm2_1024_15_64_progress8ek` | `--feature-set halfka-hm-merged --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin> --ft-out 1024 --l1 16 --l2 64` | `YANEURAOU_ENGINE_SFNN_halfkahm2_1024_15_64_progress8ek` |
-| `halfkahm2_2304_15_64_progress8ek` | 上の `--ft-out` を 2304 にする | `YANEURAOU_ENGINE_SFNN_halfkahm2_2304_15_64_progress8ek` |
+| ネットワーク | サブコマンド | `--feature-set` | サブコマンドの後ろの option |
+|---|---|---|---|
+| `halfkahm2_1024_15_64_progress8ek` | `layerstack` | `halfka-hm-merged` | `--ft-out 1024 --l1 16 --l2 64 --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin>` |
+| `halfkahm2_2304_15_64_progress8ek` | `layerstack` | `halfka-hm-merged` | `--ft-out 2304 --l1 16 --l2 64 --bucket-mode progresskpabsq16ek --progress-coeff <progress.bin>` |
 
 `nnue-train` が書く `.bin` は `net_to_yo --assume-progresskpabsq16ek` で変換する
 ([詳細](docs/net-to-yaneuraou.md))。変換後のファイルの Network 名は KingRank9 の net と
@@ -156,9 +155,8 @@ directory に `nn.bin` と `progress.bin` を置き、`eval_options.txt` に `LS
 
 ネットワーク名は [shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) フォークの
 命名 (`NNUE_<feature>_<FT>x2_<H1>_<H2>`、同フォークの
-`source/eval/nnue/architectures/README.md` に説明がある) に従う。同フォークの Makefile は
-edition 名から architecture header を生成する。あるネットワーク向けにビルドしたエンジンに
-別のネットワークの `.bin` を読ませると、`NNUE hash mismatch` と `failed to read nn.bin` で
+`source/eval/nnue/architectures/README.md` に説明がある) に従う。YaneuraOu に別の
+ネットワークの `.bin` を読ませると、`NNUE hash mismatch` と `failed to read nn.bin` で
 拒否される。
 
 他の学習器がこれらのネットワーク向けに書いた `.bin` も `--init-from` で読める。次の条件を
@@ -279,8 +277,8 @@ tatara が出力する量子化 `.bin` は [rshogi](https://github.com/SH11235/r
 限らず、アーキテクチャによっては推論部の追加実装をしないとロードできない。
 対応する 1536-16-32 LayerStack は
 [`net_to_yo`](docs/net-to-yaneuraou.md) で変換できる。
-「YaneuraOu で読めるネットワーク」の表にある `simple` ネットワークは、対応する edition の
-YaneuraOu にそのまま読める。出力の scale は file ではなく YaneuraOu の `FV_SCALE` option で
+「YaneuraOu で読めるネットワーク」の表にある `simple` ネットワークは、YaneuraOu にそのまま
+読める。出力の scale は file ではなく YaneuraOu の `FV_SCALE` option で
 決まる。
 学習済みの参考 net は
 [GitHub Releases](https://github.com/SH11235/tatara/releases) に添付している。
