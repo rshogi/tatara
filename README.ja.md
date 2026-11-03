@@ -132,7 +132,56 @@ native CUDA C++ の build command、cuda-oxide のセットアップ、OS 別の
 
 kernel のビルドと smoke test は [docs/setup.ja.md](docs/setup.ja.md)、学習の回し方は
 [docs/training-quickstart.ja.md](docs/training-quickstart.ja.md) を参照。build せずに
-コンテナで動かす場合は [docs/setup.ja.md](docs/setup.ja.md#docker-image) の「Docker image」を参照。
+コンテナで学習する場合は、下の「Docker で学習する」を参照。
+
+### Docker で学習する
+
+GitHub Container Registry の image に `nnue-train` とこの workspace の各ツールが入っている。
+CUDA 12.9 に対応した NVIDIA driver と
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+がある machine なら、toolchain 無しで学習できる。
+
+```bash
+docker pull ghcr.io/rshogi/tatara:latest
+
+# GPU の smoke test。データ不要で、最後に "[smoke/simple] PASSED" と出る
+docker run --rm --gpus all ghcr.io/rshogi/tatara:latest simple
+```
+
+image 名より後ろの引数はすべて `nnue-train` に渡る。教師データは読み取り専用で、出力先は
+container が消えても残る directory で mount し、どちらも container 内の path で指定する。
+`--data` は PSV を 1 file だけ取るので、shard は先に連結する (`cat shard-*.psv > train.psv`)。
+次は、`K+P` 入力 (`--feature-set kp`) の 256x2-32-32 の素の NNUE を学習する例で、
+YaneuraOu の KP256 と同じ形になる。標準 NNUE (HalfKP) なら `--feature-set halfkp` にする:
+
+```bash
+docker run --rm --gpus all --user "$(id -u):$(id -g)" \
+  -v /path/to/data:/data:ro -v /path/to/out:/out \
+  ghcr.io/rshogi/tatara:latest \
+  --data /data/train.psv --test-data /data/val.psv \
+  --output /out --net-id kp256 \
+  --feature-set kp --superbatches <N> --batch-size 65536 --threads <N> \
+  --scale 290 --win-rate-model \
+  --wrm-in-offset 0 --wrm-target-offset 0 \
+  --wrm-in-scaling 290 --wrm-target-scaling 290 --wrm-nnue2score 290 \
+  simple --arch 256x2-32-32
+```
+
+- `--test-data` は検証用の file で、損失をスーパーバッチごとに表示する。省けば検証なしで学習する。
+- `--threads` は教師データを読み込む thread 数。必ず指定する。読み込みが律速になりやすく、
+  物理 core 数が出発点になる。
+- 1 スーパーバッチは `--batches-per-superbatch` バッチ (既定 6104) で、`--batch-size 65536`
+  なら約 4 億局面。
+- `--save-rate` スーパーバッチごと (既定 20) と最後に、出力先に `<net-id>-<superbatch>.bin`
+  (量子化した net) と `<net-id>-<superbatch>.ckpt` (再開用の状態) ができる。
+- 起動時の log に、`--scale 290` なら `fv_scale: 28` と出る。YaneuraOu は file から `fv_scale` を
+  読まないので、同じ値を USI option `FV_SCALE` で渡す。
+- ほかのツールも同じ image に入っている:
+  `docker run --rm --entrypoint net_to_yo ghcr.io/rshogi/tatara:latest --help`。
+
+GPU の選び方、他の世代の GPU、image を自分で build する方法は
+[docs/setup.ja.md](docs/setup.ja.md#docker-image) の「Docker image」、学習の option は
+[docs/training-quickstart.ja.md](docs/training-quickstart.ja.md) にある。
 
 ## ドキュメント
 
@@ -161,6 +210,11 @@ tatara が出力する量子化 `.bin` は [rshogi](https://github.com/SH11235/r
 限らず、アーキテクチャによっては推論部の追加実装をしないとロードできない。
 対応する 1536-16-32 LayerStack は
 [`net_to_yo`](docs/net-to-yaneuraou.md) で変換できる。
+`--feature-set kp` または `halfkp`、既定の CReLU、`--arch 256x2-32-32` で学習した
+`simple` の net は、YaneuraOu の KP256 と標準 NNUE (HalfKP) の評価関数ファイルと
+同じ file 構造なので、対応する edition (`YANEURAOU_ENGINE_NNUE_KP256`、または
+`YANEURAOU_ENGINE_NNUE`) の YaneuraOu にそのまま読める。出力の scale は file ではなく
+YaneuraOu の `FV_SCALE` option で決まる。
 学習済みの参考 net は
 [GitHub Releases](https://github.com/SH11235/tatara/releases) に添付している。
 自分で net を学習する場合の環境構築は [docs/setup.ja.md](docs/setup.ja.md) を参照。
