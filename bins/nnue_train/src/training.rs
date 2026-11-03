@@ -29,10 +29,12 @@ use nnue_train::trainer::LossKind;
 use nnue_train::trainer::TrainingConfig;
 #[cfg(feature = "gpu")]
 use shogi_features::progress_kpabs::ShogiProgressKPAbs;
+#[cfg(any(feature = "gpu", test))]
+use shogi_features::{
+    ENTERING_KING_NUM_BUCKETS, FeatureSet, FeatureSetSpec, KINGRANK9_NUM_BUCKETS,
+};
 #[cfg(feature = "gpu")]
 use shogi_features::{EffectBucketConfig, FtFactorizeMode, ThreatProfile};
-#[cfg(any(feature = "gpu", test))]
-use shogi_features::{FeatureSet, FeatureSetSpec, KINGRANK9_NUM_BUCKETS};
 
 #[cfg(any(feature = "gpu", test))]
 use crate::cli::*;
@@ -355,6 +357,17 @@ pub(crate) fn validate_bucket_mode(
             }
             Ok(mode)
         }
+        BucketMode::ProgressKpAbsQ16EnteringKing => {
+            if args.num_buckets != ENTERING_KING_NUM_BUCKETS {
+                return Err(format!(
+                    "--num-buckets must be {ENTERING_KING_NUM_BUCKETS} when --bucket-mode {} is used (got {}); buckets 0..=7 split the progress and bucket 8 holds mutual entering-king positions",
+                    mode.canonical_name(),
+                    args.num_buckets,
+                )
+                .into());
+            }
+            Ok(mode)
+        }
         BucketMode::KingRank9 => {
             if args.num_buckets != KINGRANK9_NUM_BUCKETS {
                 return Err(format!(
@@ -381,7 +394,7 @@ pub(crate) fn validate_output_format(
     if output_format == OutputFormatArg::Yaneuraou && !matches!(bucket_mode, BucketMode::KingRank9)
     {
         return Err(
-            "--output-format yaneuraou requires LayerStack --bucket-mode kingrank9; progress routing cannot be exported to YaneuraOu SFNN"
+            "--output-format yaneuraou requires LayerStack --bucket-mode kingrank9; progress routing cannot be exported to YaneuraOu SFNN directly (write a tatara .bin and convert it with net_to_yo)"
                 .into(),
         );
     }
