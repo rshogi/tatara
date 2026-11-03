@@ -124,6 +124,34 @@ produces `progress.bin`, the bucket coefficients for LayerStack. The approach of
 learning game progress and assigning it to output buckets is based on an idea
 from [a post by nodchip](https://nodchip.hatenablog.com/entry/2026/02/04/000000).
 
+### Networks YaneuraOu loads
+
+A `--feature-set` alone does not name a network: the width of the feature
+transformer and the two hidden layers are part of it, and a YaneuraOu build is
+compiled for exactly one such network. These four `simple` networks are
+written in the file layout of the YaneuraOu evaluation file of the same name,
+so a build of the listed edition loads the `.bin` without conversion. All four
+use the default `--activation crelu`.
+
+| Network | `--feature-set` | `simple --arch` | YaneuraOu `YANEURAOU_EDITION` |
+|---|---|---|---|
+| `halfkp_128x2_32_32` | `halfkp` | `128x2-32-32` | `YANEURAOU_ENGINE_NNUE_halfkp_128x2_32_32` |
+| `halfkp_256x2_32_32` | `halfkp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE` |
+| `halfkp_768x2_16_64` | `halfkp` | `768x2-16-64` | `YANEURAOU_ENGINE_NNUE_halfkp_768x2_16_64` |
+| `kp_256x2_32_32` | `kp` | `256x2-32-32` | `YANEURAOU_ENGINE_NNUE_KP256` |
+
+The names follow the network naming of the
+[shielune/YaneuraOu](https://github.com/shielune/YaneuraOu) fork
+(`NNUE_<feature>_<FT>x2_<H1>_<H2>`, described in its
+`source/eval/nnue/architectures/README.md`), whose Makefile generates the
+architecture header from the edition name. An engine built for one network
+refuses a `.bin` of another with `NNUE hash mismatch` and `failed to read nn.bin`.
+
+`.bin` files written by other trainers may be rejected by `--init-from`: the
+architecture string in their header can differ from the one tatara writes (the
+layer names, a `ModelType=` prefix, a missing `fv_scale`), even where the network
+is the same.
+
 ## Setup
 
 ### Requirements
@@ -144,9 +172,61 @@ instructions, and the supported-GPU matrix, see [docs/setup.md](docs/setup.md).
 
 For building the kernels and running the smoke test, see
 [docs/setup.md](docs/setup.md); for how to run training, see
-[docs/training-quickstart.md](docs/training-quickstart.md). To run the trainer in a
-container instead of building it, see "Docker image" in
-[docs/setup.md](docs/setup.md#docker-image).
+[docs/training-quickstart.md](docs/training-quickstart.md). To skip the build and
+train in a container, see "Train with Docker" below.
+
+### Train with Docker
+
+The image on GitHub Container Registry holds `nnue-train` and the other tools of this
+workspace, so a machine with an NVIDIA driver that supports CUDA 12.9 and the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+can train without a toolchain.
+
+```bash
+docker pull ghcr.io/rshogi/tatara:latest
+
+# GPU smoke test, no data needed; ends with "[smoke/simple] PASSED"
+docker run --rm --gpus all ghcr.io/rshogi/tatara:latest simple
+```
+
+Everything after the image name goes to `nnue-train`. Mount the teacher data
+read-only and an output directory that outlives the container, and give both
+by their paths inside the container. `--data` takes one PSV file, so concatenate
+shards first (`cat shard-*.psv > train.psv`). This trains the `kp_256x2_32_32`
+network; for another one, change `--feature-set` and `--arch` as in
+"Networks YaneuraOu loads" above:
+
+```bash
+docker run --rm --gpus all --user "$(id -u):$(id -g)" \
+  -v /path/to/data:/data:ro -v /path/to/out:/out \
+  ghcr.io/rshogi/tatara:latest \
+  --data /data/train.psv --test-data /data/val.psv \
+  --output /out --net-id kp256 \
+  --feature-set kp --superbatches <N> --batch-size 65536 --threads <N> \
+  --scale 290 --win-rate-model \
+  --wrm-in-offset 0 --wrm-target-offset 0 \
+  --wrm-in-scaling 290 --wrm-target-scaling 290 --wrm-nnue2score 290 \
+  simple --arch 256x2-32-32
+```
+
+- `--test-data` is the held-out file whose loss is printed after every superbatch.
+  Leave it out to train without validation.
+- `--threads` is the number of data-loading threads. Always set it: the data loader is
+  usually the bottleneck, and the number of physical cores is a good starting point.
+- A superbatch is `--batches-per-superbatch` batches (default 6104), about 400 million
+  positions at `--batch-size 65536`.
+- Every `--save-rate` superbatches (default 20) and at the end, the output directory
+  gets `<net-id>-<superbatch>.bin` (the quantised net) and `<net-id>-<superbatch>.ckpt`
+  (resume state).
+- The startup log prints `fv_scale: 28` for `--scale 290`. YaneuraOu does not read
+  `fv_scale` from the file; give the same number to the engine as the USI option
+  `FV_SCALE`.
+- The other tools are in the same image: `docker run --rm --entrypoint net_to_yo
+  ghcr.io/rshogi/tatara:latest --help`.
+
+Choosing GPUs, other GPU generations, and building the image yourself are covered under
+"Docker image" in [docs/setup.md](docs/setup.md#docker-image); the training options are in
+[docs/training-quickstart.md](docs/training-quickstart.md).
 
 ## Documentation
 
@@ -184,6 +264,9 @@ engines such as YaneuraOu cannot necessarily load it as-is; depending on the
 architecture, some nets need additional inference code before they can be
 loaded. A supported LayerStack net can be converted to and from the YaneuraOu
 format with [`net_to_yo` / `net_from_yo`](docs/net-to-yaneuraou.md).
+The `simple` networks listed under "Networks YaneuraOu loads" are loaded by a
+YaneuraOu build of the matching edition without conversion. YaneuraOu takes the
+output scale from its `FV_SCALE` option, not from the file.
 Pre-trained reference nets are attached to the
 [GitHub Releases](https://github.com/SH11235/tatara/releases). To train your
 own net, see the [setup guide](docs/setup.md).
